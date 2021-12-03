@@ -37,16 +37,19 @@ from abstract_domains import Hyperbox, Zonotope
 
 class DecompDual:
     def __init__(self, network, input_domain, preact_domain=Hyperbox,
-                 clever_zono=False):
+                 prespec_bounds=None, clever_zono=False):
         self.network = network
         self.input_domain = input_domain
 
         # Compute preactivations (interval analysis)
         self.preact_domain = preact_domain
-        self.clever_zono = clever_zono
-        self.preact_bounds = PreactBounds(network, input_domain, preact_domain)
-        self.preact_bounds.compute()
+        if prespec_bounds is not None:
+            self.preact_bounds = prespec_bounds
+        else:
+            self.preact_bounds = PreactBounds(network, input_domain, preact_domain)
+            self.preact_bounds.compute()
 
+        self.clever_zono = clever_zono
         # Initialize dual variables
         self.lambda_ = []
         for i, layer in enumerate(self.network):
@@ -55,6 +58,7 @@ class DecompDual:
                                                      requires_grad=True))
             else:
                 self.lambda_.append(None)
+
 
     def lagrangian(self, x: OrderedDict, by_var=False):
         """ Computes the lagrangian with the current dual variables and
@@ -75,7 +79,7 @@ class DecompDual:
 
             return total
 
-        return sum(total.values())
+        return sum(total.values()) - total['total']
 
 
     def lagrange_by_var(self, x: OrderedDict):

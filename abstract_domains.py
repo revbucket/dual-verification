@@ -3,7 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import gurobipy as gb
 from collections import OrderedDict
-
+import random
+import utilities as utils
 
 
 class AbstractDomain:
@@ -123,6 +124,12 @@ class Zonotope(AbstractDomain):
 		self.ubs = hbox.ubs
 		self.rad = (self.ubs - self.lbs) / 2.0
 
+		self.dim = self.lbs.numel()
+		self.order = self.generator.shape[1] / self.dim
+
+	def __call__(self, y):
+		return self.center + self.generator @ y
+
 	def cuda(self):
 		self.center = center.cuda()
 		self.generator = generator.cuda()
@@ -187,6 +194,49 @@ class Zonotope(AbstractDomain):
 		if model.Status == 2:
 			return np.array([y.x for y in yvars])
 		return None
+
+
+	def partition(self, groups):
+		""" Partitions this input into multiple zonotopes of different coordinates
+			e.g. Just groups the zonotopes into multiple zonotopes based on coordinate
+				 indices
+		ARGS:
+			- groups is a list of index-lists. Final one may be omitted/inferred
+		"""
+		groups = utils.complete_partition(groups, self.lbs.numel())
+
+		out_zonos = []
+		for group in groups:
+			out_zonos.append(Zonotope(self.center[group], self.generator[group]))
+		return out_zonos
+
+
+	def reduce_simple(self, order, score='norm'):
+		""" Does the simplest order reduction possible
+		Keeps the (order-1) * dim largest 2-norm generator columns
+		And then adds a minkowski sum of the remainder to split the differenc
+
+		score:
+			'norm': keeps longest generators
+			'axalign': scores based on  ||g||_1 - ||g||_infty
+		"""
+
+		if score == 'norm':
+			scores = self.generator.norm(dim=0, p=2)
+		else:
+			scores = self.generator.norm(dim=0, p=1) -\
+					 self.generator.norm(dim=0, p=float('inf'))
+		sorted_idxs = torch.sort(scores, descending=True).indices
+		keep_num = int((order - 1) * self.lbs.numel())
+		keep_idxs = sorted_idxs[:keep_num]
+		keep_gens = self.generator[:, keep_idxs]
+
+		trash_idxs = sorted_idxs[keep_num:]
+		trash_gens = self.generator[:, trash_idxs]
+		box_gens = torch.diag(trash_gens.abs().sum(dim=1))
+
+		return Zonotope(self.center, torch.cat([keep_gens, box_gens], dim=1))
+
 
 
 	# =============================================
@@ -270,15 +320,25 @@ class Zonotope(AbstractDomain):
 
 
 
-	def solve_relu_mip(self, c1, c2):
+	def solve_relu_mip(self, c1, c2, apx_params=None, verbose=False):
 		""" Solves the optimization program:
 			min c1*z + c2*Relu(z) over this zonotope
 
+		if apx_params is None, we return only a LOWER BOUND
+		on the objective value
 		Returns
 			(opt_val, argmin x, argmin y)
 		"""
 		mip_dict = self._encode_mip()
 		model = mip_dict['model']
+
+		for k,v in (apx_params or {}).items():
+			model.setParam(k, v)
+
+		if verbose is False:
+			model.setParam('OutputFlag', False)
+
+
 		xs, ys = mip_dict['xs'], mip_dict['ys']
 
 		# Now add ReLU constraints, using the big-M encoding
@@ -314,15 +374,33 @@ class Zonotope(AbstractDomain):
 
 		# And solve and read solutions
 		model.optimize()
+
+		if apx_params is not None:
+			return model.ObjBound, model
 		obj = model.objVal
 		xvals = [_.x for _ in xs]
 		yvals = [_.x for _ in ys]
 
-		return obj, xvals, yvals
+		return obj, xvals, yvals, model
 
 
+	def k_group_relu(self, c1, c2, k=10):
+		# Randomly partitions into groups of size k and solves relu programming over prismed zonos
+		dim = self.lbs.numel()
+		gap = dim // k
+		idxs = list(range(dim))
+		random.shuffle(idxs)
+		groups = [idxs[i::gap] for i in range(gap)]
+		opt_point = torch.zeros_like(self.center)
+		zonos = self.partition(groups)
 
+		outputs = []
+		for z, g in zip(zonos, groups):
+			this_out = z.solve_relu_mip(c1[g], c2[g])
+			outputs.append(this_out[0])
+			opt_point[g] = torch.tensor(this_out[1])
 
+		return sum(outputs), opt_point
 
 
 # ========================================================

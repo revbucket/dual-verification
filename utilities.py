@@ -18,6 +18,32 @@ class ParameterObject:
 
 
 
+# ========================================================
+# =           Other helpful methods                      =
+# ========================================================
+
+def complete_partition(groups, total):
+	""" If given an incomplete partition, creates the indices needed
+		to make it a full partition (and sorts each subgroup)
+	"""
+	solo_group = isinstance(groups[0], int)
+	total_groupsize = len(groups) if solo_group else sum(len(_) for _ in groups)
+	if total_groupsize < total:
+		if solo_group:
+			all_idxs = set(groups)
+			groups = [groups]
+		else:
+			all_idxs = set(groups[0]).union(groups[1:])
+		outgroup = []
+		for i in range(total):
+			if i not in all_idxs:
+				outgroup.append(i)
+
+		groups = [sorted(_) for _ in groups] + [outgroup]
+	else:
+		groups = [sorted(_) for _ in groups]
+
+	return groups
 
 
 # =======================================================

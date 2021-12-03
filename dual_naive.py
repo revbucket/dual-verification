@@ -39,6 +39,8 @@ Hence the algorithm is to do the following:
 """
 
 import torch
+import random
+import utilities as utils
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
@@ -46,7 +48,7 @@ from typing import List
 
 from neural_nets import FFNet, PreactBounds
 from abstract_domains import Hyperbox, Zonotope
-
+from collections import defaultdict, OrderedDict
 
 class NaiveDual:
 
@@ -73,7 +75,8 @@ class NaiveDual:
                                                  requires_grad=True))
 
 
-    def lagrangian(self, x: List[torch.Tensor], verbose=False):
+    def lagrangian(self, x: List[torch.Tensor], verbose=False,
+                   split=False):
         """ Computes the lagrangian with the current dual variables and
             provided input.
         ARGS:
@@ -81,42 +84,59 @@ class NaiveDual:
         """
         # Start from the front
         val = 0.0
+        split_vals = {}
         for idx, layer in enumerate(self.network):
             layer_val = self.lambda_[idx] @ (x[idx + 1] - layer(x[idx]))
             if verbose:
                 print(layer_val)
-            val += layer_val
-        val += x[-1][0] # Add the output too
-        return val
+
+            split_vals[idx] = layer_val
+        split_vals[idx + 1] = x[-1][0]
+        if split:
+            return split_vals
+        return sum(split_vals.values())
+
 
     def lagrange_by_var(self, x: List[torch.Tensor]):
-        """
-        Prints out the output of each minimization, separated
-        by variable. Can help show areas for improvement
-        4 types of terms:
-        1. -lambda_1 @ A(x1)
-        2. sum from i=2 to L of: (-lambda_i @ A + mu_i-1) @ xi
-        3. sum from i=1 to L-1 of: lambda_i @ z_i - mu_i @ ReLU(z_i)
-        4. (lambda_L + 1) z_L
+        """ More accurate way to do lagrange by var"""
+
+        output = OrderedDict()
+        for idx, layer in enumerate(self.network):
+            varname = '%s:%d' % ('x' if (idx % 2 == 0) else 'z', idx // 2)
+            if idx == 0:
+                output[varname] = -self.lambda_[idx] @ layer(x[idx])
+            else:
+                output[varname] = (self.lambda_[idx - 1] @ x[idx] -
+                                   self.lambda_[idx] @ layer(x[idx]))
+
+        output['output'] = (1 + self.lambda_[-1]) * x[-1][0]
+        return output
+
+
+
+    def lagrange_lb(self):
+        """ Gets just lower bounds for the lagrangian using quick
+            MIP relaxations
         """
         total_info = {}
+        total_info = {}
         total_len = len(self.network)
-        total_val = 0.0
+        x = self.argmin()
         for idx, layer in enumerate(self.network):
             pfx = 'x' if (idx % 2 == 0) else 'z'
             varname = '%s:%d' % (pfx, idx // 2)
-
+            if pfx == 'z':
+                total_info[varname] = self.apx_mip_zi(idx)
+                continue
             val = self.lambda_[idx] @ (-layer(x[idx]))
             if idx > 0:
                 val += self.lambda_[idx - 1] @ x[idx]
             total_info[varname] = val
-            total_val += val
+
         output_val = (self.lambda_[-1] + 1) @ x[-1]
         total_info['output'] = output_val
-        total_val += output_val
-        total_info['total'] = total_val
+        total_info['total'] = sum(total_info.values())
         return total_info
-        # Start from the front
 
 
     def argmin(self):
@@ -128,9 +148,20 @@ class NaiveDual:
 
                 if self.choice == 'loop':
                     argmin.append(self.argmin_z_i_loop(i))
+                elif self.choice == 'exact':
+                    argmin.append(torch.tensor(self.exact_zi(i)))
+                elif self.choice == 'partition':
+                    argmin.append(torch.tensor(self.partition_zi(i)))
+                elif self.choice == 'fw':
+                    argmin.append(torch.tensor(self.fw_zi(i)))
                 else:
                     argmin.append(self.proper_argmin_zi(i))
         return [_.data for _ in argmin]
+
+
+    # ============================================================
+    # =           Argmin for X_i: this is always exact           =
+    # ============================================================
 
     def argmin_x_i(self, idx: int):
         """ Gets the argmin for the x_i variable in the lagrangian
@@ -144,6 +175,12 @@ class NaiveDual:
         if idx > 0:
             base_obj += self.lambda_[idx - 1]
         return self.preact_bounds[idx].solve_lp(base_obj, True)[1]
+
+
+    # ===========================================================
+    # =           Argmin for Z_i: Many choices here             =
+    # ===========================================================
+
 
     def argmin_z_i_loop(self, idx: int):
         """ Gets the argmin for the z_i variable in the lagrangian
@@ -254,7 +291,109 @@ class NaiveDual:
         return argmin
 
 
-        ####
+    def partition_zi(self, idx: int):
+        assert idx % 2 == 1
+
+        bounds = self.preact_bounds[idx]
+        if idx == len(self.network):
+            obj = self.lambda_[idx - 1] + 1
+            return bounds.solve_lp(obj, True)[1]
+        lbs, ubs = bounds.lbs, bounds.ubs
+
+
+        def partition (list_in, n):
+            random.shuffle(list_in)
+            return [list_in[i::n] for i in range(n)]
+
+
+
+
+        def random_partition_bounds(zono, c1, c2, num_parts=10, preproc=None, argmin=False):
+            preproc = preproc or (lambda x: x)
+            parts = partition(list(range(zono.center.numel())), num_parts)
+            parts = utils.complete_partition(parts, zono.center.numel())
+            subzonos = zono.partition(parts)
+            outputs = []
+            for part, subzono in zip(parts, subzonos):
+                subzono = preproc(subzono)
+                outputs.append(subzono.solve_relu_mip(c1[part], c2[part]))
+
+            if argmin:
+                returnval = torch.zeros_like(zono.lbs)
+                for part, output in zip(parts, outputs):
+                    returnval[part] = torch.tensor(output[1], dtype=returnval.dtype)
+                return returnval
+            return outputs
+
+        return random_partition_bounds(bounds, self.lambda_[idx -1], -self.lambda_[idx],
+                                       num_parts=10, argmin=True)
+
+
+
+
+    def apx_mip_zi(self, idx: int):
+        apx_params = {'TimeLimit': 2.0}
+        assert idx % 2 == 1
+        bounds = self.preact_bounds[idx]
+        if idx == len(self.network):
+            obj = self.lambda_[idx - 1] + 1
+            return bounds.solve_lp(obj, True)[0]
+
+        assert isinstance(bounds, Zonotope)
+        return bounds.solve_relu_mip(self.lambda_[idx - 1], -self.lambda_[idx],
+                                                   apx_params=apx_params)
+
+
+    def fw_zi(self, idx: int):
+        assert idx % 2 == 1
+        bounds = self.preact_bounds[idx]
+        if idx == len(self.network):
+            obj = self.lambda_[idx - 1] + 1
+            return bounds.solve_lp(obj, True)[1]
+
+        assert isinstance(bounds, Zonotope)
+        zono = bounds
+        c1 = self.lambda_[idx - 1]
+        c2 = -self.lambda_[idx]
+
+        # Everything is done over y-space!
+        def f(y):
+            x = zono(y)
+            return c1 @ x + c2 @ torch.relu(x)
+        def g(y):
+            return c1 + torch.relu(zono(y)) * c2
+        def s_plus(y):
+            # Returns the y that minimizes <g, c + Gy>
+            return -torch.sign(g(y) @ zono.generator)
+
+        if True:# rand_init:
+            y = torch.rand_like(zono.generator[0]) * 2 - 1.0
+        else:
+            y = torch.zeros_like(zono.generator[0])
+
+        for step in range(100):# range(num_iter):
+            gamma = 2 / float(step + 2.0)
+            y = (1 - gamma) * y + gamma * s_plus(y)
+        return zono(y)#, f(y)
+
+
+
+    def exact_zi(self, idx: int):
+        """ Exactly solves the z_i's (uses MIP so very slow)"""
+        print('-' * 40)
+        print('ZZZZZZZ    ', idx)
+        print('-' * 40)
+        assert idx % 2 == 1
+        bounds = self.preact_bounds[idx]
+        if idx == len(self.network):
+            obj = self.lambda_[idx - 1] + 1
+            return bounds.solve_lp(obj, True)[1]
+
+        if isinstance(bounds, Hyperbox):
+            return proper_argmin_zi(idx)
+        elif isinstance(bounds, Zonotope):
+            obj, xvals, yvals = bounds.solve_relu_mip(self.lambda_[idx - 1], -self.lambda_[idx])
+            return xvals
 
 
     def dual_ascent(self, num_steps: int, optimizer=None, verbose=False,
@@ -278,6 +417,44 @@ class NaiveDual:
             logger(self)
             optimizer.zero_grad()
             l_val = -self.lagrangian(self.argmin()) # negate to ASCEND
+            l_val.backward()
+            if (verbose is True or
+                (isinstance(verbose, int) and step % verbose == 0)):
+                print("Iter %02d | Certificate: %.02f" % (step, -l_val))
+            optimizer.step()
+
+
+        return self.lagrangian(self.argmin())
+
+
+
+
+    def dual_ascent_by_var(self, num_steps: int, optimizer=None, verbose=False,
+                    logger=None):
+        """ Runs the dual ascent process
+        ARGS:
+            num_steps: number of gradient steps to perform
+            optimizer: if optimizer is not None, is a partially applied
+                       function that just takes the tensors to optimize as
+                       an arg
+        RETURNS:
+            final dual value
+        """
+        if optimizer is None:
+            optimizer = optim.SGD(self.lambda_, lr=1e-3)
+        else:
+            optimizer = optimizer(self.lambda_)
+        logger = logger or (lambda x: None)
+
+        for step in range(num_steps):
+            logger(self)
+            optimizer.zero_grad()
+            lbv = self.lagrange_by_var(self.argmin())
+            for k in lbv:
+                if k.startswith('z'):
+                    lbv[k] = lbv[k]
+            l_val = -sum(lbv.values())
+            #l_val = -self.lagrangian_(self.argmin()) # negate to ASCEND
             l_val.backward()
             if (verbose is True or
                 (isinstance(verbose, int) and step % verbose == 0)):
