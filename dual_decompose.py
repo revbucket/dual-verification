@@ -37,7 +37,8 @@ from abstract_domains import Hyperbox, Zonotope
 
 class DecompDual:
     def __init__(self, network, input_domain, preact_domain=Hyperbox,
-                 prespec_bounds=None, clever_zono=False):
+                 prespec_bounds=None, choice='naive', partition_kwargs=None,
+                 zero_dual=False):
         self.network = network
         self.input_domain = input_domain
 
@@ -49,15 +50,68 @@ class DecompDual:
             self.preact_bounds = PreactBounds(network, input_domain, preact_domain)
             self.preact_bounds.compute()
 
-        self.clever_zono = clever_zono
+
+        # Parameters regarding z_i calculation
+        self.choice = choice
+        self.partition_kwargs = partition_kwargs
+
         # Initialize dual variables
-        self.lambda_ = []
+        if not zero_dual:
+            self.lambda_ = self.initialize_duals()
+        else:
+            self.lambda_ = []
+            for i, layer in enumerate(self.network):
+                if isinstance(layer, nn.ReLU):
+                    self.lambda_.append(nn.Parameter(torch.zeros_like(self.preact_bounds[i].lbs)))
+                else:
+                    self.lambda_.append(None)
+
+    def parameters(self):
+        return iter([_ for _ in self.lambda_ if _ is not None])
+
+
+    def initialize_duals(self):
+        """ Dual initialization scheme from KW2017"""
+        lambdas = []
+        bounds = self.preact_bounds.bounds
+
+        # First compute all the D's and Weights
+        diags = []
+        weights = []
+        for bound, layer in zip(bounds, self.network):
+
+            if isinstance(layer, nn.ReLU):
+                lbs, ubs = bound.lbs, bound.ubs
+                diag = torch.zeros_like(lbs)
+                diag[lbs > 0] = 1
+                unc_idxs = (lbs * ubs < 0)
+                diag[unc_idxs] = ubs[unc_idxs] / (ubs[unc_idxs] - lbs[unc_idxs])
+                weight = None
+            else:
+                diag = None
+                weight = layer.weight
+            diags.append(diag)
+            weights.append(weight)
+
+        # Then run backwards
+        backwards = [weights[-1].squeeze()]
+        for i in range(len(diags)-2, -1, -1):
+            if i % 2 == 0:
+                running = weights[i].T @ backwards[-1]
+            else:
+                running = diags[i] * backwards[-1]
+            backwards.append(running)
+        backwards = backwards[::-1]
+
+        # And then attach to lambdas
         for i, layer in enumerate(self.network):
             if isinstance(layer, nn.ReLU):
-                self.lambda_.append(torch.zeros_like(self.preact_bounds[i].lbs,
-                                                     requires_grad=True))
+                lambdas.append(nn.Parameter(backwards[i].detach()))
             else:
-                self.lambda_.append(None)
+                lambdas.append(None)
+
+        return lambdas
+
 
 
     def lagrangian(self, x: OrderedDict, by_var=False):
@@ -78,25 +132,89 @@ class DecompDual:
         if by_var:
 
             return total
-
         return sum(total.values()) - total['total']
 
 
-    def lagrange_by_var(self, x: OrderedDict):
-        return self.lagrangian(x, by_var=True)
+    def lagrange_by_rp(self, x: OrderedDict):
+        total = {}
+        for i, layer in enumerate(self.network):
+            if not isinstance(layer, nn.ReLU):
+                continue
+            x_b = x[(i, 'B')]
+            x_a = x[(i + 2, 'A')]
+            if i == 1:
+                val = self.lambda_[i + 2] @ self.network[i + 1](F.relu(x_b))
+            elif i < len(self.network) - 2:
+                val = -self.lambda_[i] @ x_b + self.lambda_[i + 2] @ self.network[i + 1](F.relu(x_b))
+            else:
+                val = -self.lambda_[i] @ x_b + self.network[i + 1](F.relu(x_b))
+            total['P%s' % i] = val
+        return total
+
+
+    def lagrange_bounds(self, apx_params=None):
+        total = {}
+        for i, layer in enumerate(self.network):
+            if not isinstance(layer, nn.ReLU):
+                continue
+            bounds = self.preact_bounds[i]
+            if i == 1:
+                c1 = torch.zeros_like(bounds.lbs)
+                c2 = self.lambda_[i + 2] @ self.network[i + 1].weight
+                bias = self.lambda_[i + 2] @ self.network[i + 1].bias
+            elif i < len(self.network) - 2:
+                c1 = -self.lambda_[i]
+                c2 = self.lambda_[i + 2] @ self.network[i + 1].weight
+                bias = self.lambda_[i + 2] @ self.network[i + 1].bias
+            else:
+                c1 = -self.lambda_[i]
+                c2 = self.network[i + 1].weight.squeeze()
+                bias = self.network[i + 1].bias.squeeze()
+            model = bounds.solve_relu_mip(c1, c2, apx_params=apx_params)[1]
+            total['P%s' % i] = (model.ObjBound + bias.item(), model.objVal + bias.item())
+
+        total_lb = sum(_[0] for _ in total.values())
+        total_ub = sum(_[1] for _ in total.values())
+        total['total_lb'] = total_lb
+        total['total_ub'] = total_ub
+
+        return total
+
 
 
     def argmin(self):
         argmin = OrderedDict()
         for i, layer in enumerate(self.network):
             if isinstance(layer, nn.ReLU):
-                if self.clever_zono:
-                    i_B, ip1_A = self.argmin_pi_zono2(i)
+                if self.choice == 'naive':
+                    i_B, ip1_A = self.argmin_pi_zono(i)
+                elif self.choice == 'partition':
+                    i_B, ip1_A = self.argmin_pi_partition(i)
                 else:
-                    i_B, ip1_A = self.argmin_pi(i)
+                    raise NotImplementedError()
                 argmin[(i, 'B')] = i_B
                 argmin[(i+2, 'A')] = ip1_A
         return argmin
+
+
+    def _get_coeffs(self, idx: int):
+        """ Gets the coeficients to be used in ReLU programming
+        RETURNS: (lin_coeff, relu_coeff)
+        """
+        if idx == 1:
+            # Special case
+            # Min lambda_2 @ A2 (Relu(Z_1A))
+            # over the set Z1A in A1(X)
+            lin_coeff = torch.zeros_like(self.preact_bounds[idx].lbs)
+            relu_coeff = self.network[idx + 1].weight.T @ self.lambda_[idx + 2]
+
+        elif idx < len(self.network) - 2:
+            lin_coeff = -self.lambda_[idx]
+            relu_coeff = self.network[idx + 1].weight.T @ self.lambda_[idx + 2]
+        else:
+            lin_coeff = -self.lambda_[idx]
+            relu_coeff = self.network[idx + 1].weight.T
+        return lin_coeff, relu_coeff
 
 
     def argmin_pi(self, idx: int):
@@ -110,19 +228,7 @@ class DecompDual:
         # Define the objectives to solve over
         # In general we have
         # Min_Z   c1 @ z + c2 @ relu(z)
-        if idx == 1:
-            # Special case
-            # Min lambda_2 @ A2 (Relu(Z_1A))
-            # over the set Z1A in A1(X)
-            lin_coeff = torch.zeros_like(lbs)
-            relu_coeff = self.network[idx + 1].weight.T @ self.lambda_[idx + 2]
-
-        elif idx < len(self.network) - 2:
-            lin_coeff = -self.lambda_[idx]
-            relu_coeff = self.network[idx + 1].weight.T @ self.lambda_[idx + 2]
-        else:
-            lin_coeff = -self.lambda_[idx]
-            relu_coeff = self.network[idx + 1].weight.T
+        lin_coeff, relu_coeff = self._get_coeffs(idx)
 
 
         argmin = torch.clone(bounds.center)
@@ -143,7 +249,7 @@ class DecompDual:
 
         return (argmin.data, self.network[idx + 1](F.relu(argmin)).data)
 
-    def argmin_pi_zono2(self, idx: int):
+    def argmin_pi_zono(self, idx: int):
 
         bounds = self.preact_bounds[idx]
         if not isinstance(bounds, Zonotope):
@@ -152,20 +258,7 @@ class DecompDual:
         assert isinstance(self.network[idx], nn.ReLU)
         lbs, ubs = bounds.lbs, bounds.ubs
         ## LAYERWISE STUFF HERE: Compute the objective vector
-        if idx == 1:
-            # Special case
-            # Min lambda_2 @ A2 (Relu(Z_1A))
-            # over the set Z1A in A1(X)
-            lin_coeff = torch.zeros_like(lbs)
-            relu_coeff = self.network[idx + 1].weight.T @ self.lambda_[idx + 2]
-
-        elif idx < len(self.network) - 2:
-            lin_coeff = -self.lambda_[idx]
-            relu_coeff = self.network[idx + 1].weight.T @ self.lambda_[idx + 2]
-        else:
-            lin_coeff = -self.lambda_[idx]
-            relu_coeff = self.network[idx + 1].weight.T
-
+        lin_coeff, relu_coeff = self._get_coeffs(idx)
 
         ## Now do the more clever zonotope thing
         #  We separate into fixed-relu and non-fixed settings
@@ -199,36 +292,82 @@ class DecompDual:
         return (argmin.data, self.network[idx + 1](F.relu(argmin)).data)
 
 
+    def _default_partition_kwargs(self):
+        return {'num_partitions': 10,
+                'partition_style': 'random', # vs 'fixed'
+                'partitions': None, # subzonos stored here
+               }
+
+    def shrink_partitions(self, num_groups):
+        if self.partition_kwargs.get('partitions') is None:
+            return
+        for k in self.partition_kwargs['partitions']:
+            new_part = Zonotope.merge_partitions(self.partition_kwargs['partitions'][k], num_groups)
+            self.partition_kwargs['partitions'][k] = new_part
+        self.partition_kwargs['num_partitions'] = num_groups
+
+
+
+    def argmin_pi_partition(self, idx: int):
+        bounds = self.preact_bounds[idx]
+        lbs, ubs = bounds.lbs, bounds.ubs
+        c1, c2 = self._get_coeffs(idx)
+
+
+        # Partition generation
+        if self.partition_kwargs is None:
+            self.partition_kwargs = self._default_partition_kwargs()
+        kwargs = self.partition_kwargs
+        if kwargs['partition_style'] == 'random':
+            partitions = bounds.make_random_partitions(kwargs['num_partitions'])
+        else:
+            if kwargs.get('partitions', None) is None:
+                kwargs['partitions'] = {}
+            if kwargs['partitions'].get(idx, None) is None:
+                kwargs['partitions'][idx] = bounds.make_random_partitions(kwargs['num_partitions'])
+            partitions = kwargs['partitions'][idx]
+
+        # Partition optimization
+        if kwargs.get('preproc', None) is None: # preprocess each partition
+            preproc = lambda x: x
+        outputs = []
+        for group, subzono in partitions:
+            subzono = preproc(subzono)
+            outputs.append(subzono.solve_relu_mip(c1[group], c2[group]))
+
+        argmin = torch.zeros_like(bounds.lbs)
+        for (group, subzono), output in zip(partitions, outputs):
+            argmin[group] = torch.tensor(output[1], dtype=argmin.dtype)
+
+        min_val = c1.squeeze() @ argmin.squeeze() + c2.squeeze() @ torch.relu(argmin).squeeze()
+        return (argmin.data , self.network[idx + 1](F.relu(argmin)).data)
 
 
 
 
-
-    def dual_ascent(self, num_steps: int, optimizer=None, verbose=False,
+    def dual_ascent(self, num_steps: int, optim_obj=None, verbose=False,
                     logger=None):
         """ Runs the dual ascent process
         ARGS:
             num_steps: number of gradient steps to perform
-            optimizer: if optimizer is not None, is a partially applied
-                       function that just takes the tensors to optimize as
-                       an arg
+            optim_obj: Optimizer that modifies the self.lambda_ parameters
+            verbose: bool or int -- if int k, prints every k'th iteration
+            logger: (optional) function that gets called at every iteration
         RETURNS:
             final dual value
         """
-        if optimizer is None:
-            optimizer = optim.SGD([_ for _ in self.lambda_ if _ is not None],
+        if optim_obj is None:
+            optim_obj = optim.Adam(self.parameters(),
                                   lr=1e-3)
-        else:
-            optimizer = optimizer([_ for _ in self.lambda_ if _ is not None])
         logger = logger or (lambda x: None)
         for step in range(num_steps):
             logger(self)
-            optimizer.zero_grad()
+            optim_obj.zero_grad()
             l_val = -self.lagrangian(self.argmin()) # negate to ASCEND
             l_val.backward()
-            if verbose:
+            if verbose and (step % verbose) == 0:
                 print("Iter %02d | Certificate: %.02f" % (step, -l_val))
-            optimizer.step()
+            optim_obj.step()
 
 
         return self.lagrangian(self.argmin())

@@ -5,7 +5,8 @@ import gurobipy as gb
 from collections import OrderedDict
 import random
 import utilities as utils
-
+import itertools
+import numpy as np
 
 class AbstractDomain:
 	""" Abstract class that handles forward passes """
@@ -39,7 +40,7 @@ class Hyperbox(AbstractDomain):
 		self.ubs = self.ubs.cpu()
 
 	def twocol(self):
-		return torch.stack([self.lbs, self.ubs])
+		return torch.stack([self.lbs, self.ubs]).T
 
 	def dim(self):
 		return self.lbs.numel()
@@ -126,9 +127,37 @@ class Zonotope(AbstractDomain):
 
 		self.dim = self.lbs.numel()
 		self.order = self.generator.shape[1] / self.dim
+		self.keep_mip = True
+		self.relu_prog_model = None
 
 	def __call__(self, y):
 		return self.center + self.generator @ y
+
+	@classmethod
+	def merge_partitions(cls, partitions, num_groups=1):
+		""" Merges partitions into a single zonotope
+		ARGS:
+			partitions: list of ([idx...], zono) pairs
+			num_groups: how many
+		RETURNS:
+			list of ([idx...], zono) pairs of length num_groups
+		"""
+		if num_groups > 1:
+			idx_groups = [list(range(k, len(partitions), num_groups)) for k in range(num_groups)]
+		else:
+			idx_groups = [list(range(len(partitions)))]
+
+		outputs = []
+		for idx_group in idx_groups:
+			idxs = list(itertools.chain(*[partitions[i][0] for i in idx_group]))
+			center = torch.cat([partitions[i][1].center for i in idx_group])
+			generator = torch.cat([partitions[i][1].generator for i in idx_group])
+			outputs.append((idxs, cls(center, generator)))
+
+		return outputs
+
+
+
 
 	def cuda(self):
 		self.center = center.cuda()
@@ -166,34 +195,67 @@ class Zonotope(AbstractDomain):
 			vs.append(self.solve_lp(obj, True)[1])
 		return vs
 
-	def contains(self, x):
+	def contains(self, x, silent=True):
 		""" Returns True iff x is in the zonotope """
-		return self.y(x) is not None
+		return self.y(x, silent=silent) is not None
 
 
-	def y(self, x):
+	def y(self, x, silent=True):
 		""" Takes in a point and either returns the y-val
 			such that c+Ey = x
 		~or~ returns None (if no such y exists)
 		"""
 		model = gb.Model()
-
-		yvars = model.addVars(range(self.generator.shape[1]), lb=-1.0, ub=1.0)
+		if silent:
+			model.setParam('OutputFlag', False)
+		eps = 1e-6
+		yvars = model.addVars(range(self.generator.shape[1]), lb=-1.0-eps, ub=1.0+eps)
 		yvars = [yvars[_] for _ in range(self.generator.shape[1])]
 		model.update()
 		for i in range(self.generator.shape[0]):
-			print(self.generator[i].shape, len(yvars))
-			model.addConstr(x[i].item() == self.center[i].item() +
-							gb.LinExpr(self.generator[i], yvars))
-
+			model.addConstr(x[i].item() >= self.center[i].item() +
+							gb.LinExpr(self.generator[i], yvars) - eps)
+			model.addConstr(x[i].item() <= self.center[i].item() +
+							gb.LinExpr(self.generator[i], yvars) + eps)
 
 		model.setObjective(0.0)
 		model.update()
 		model.optimize()
 
 		if model.Status == 2:
-			return np.array([y.x for y in yvars])
+			return torch.tensor([y.x for y in yvars])
 		return None
+
+
+	def fw(self, f, num_iter=10000, rand_init=True):
+		# f is a function that operates on x in Z
+		# Runs frank wolfe on this zonotope
+
+		f_prime = lambda y: f(self(y))
+		# Setup solvers
+		def get_grad(y): # finds direction of x that minimizes f
+			x = self(y).detach().requires_grad_()
+			f(x).backward()
+			return x.grad
+
+		def s_plus(y): # returns y that minimizes linear apx of f'
+			return -torch.sign(get_grad(y) @ self.generator)
+
+		if rand_init:
+			y = torch.rand_like(self.generator[0]) * 2 - 1.0
+		else:
+			y = torch.zeros_like(self.generator[0])
+		y = y.detach().requires_grad_()
+
+		for step in range(num_iter):
+			gamma = 2 / float(step + 2.0)
+			y = (1 - gamma) * y + gamma * s_plus(y)
+		return f_prime(y), y, self(y)
+
+
+	def make_random_partitions(self, num_parts):
+		groups = utils.partition(list(range(self.dim)), num_parts)
+		return self.partition(groups)
 
 
 	def partition(self, groups):
@@ -208,7 +270,7 @@ class Zonotope(AbstractDomain):
 		out_zonos = []
 		for group in groups:
 			out_zonos.append(Zonotope(self.center[group], self.generator[group]))
-		return out_zonos
+		return list(zip(groups, out_zonos))
 
 
 	def reduce_simple(self, order, score='norm'):
@@ -319,9 +381,8 @@ class Zonotope(AbstractDomain):
 		        'ys': ys}
 
 
-
-	def solve_relu_mip(self, c1, c2, apx_params=None, verbose=False):
-		""" Solves the optimization program:
+	def _setup_relu_mip(self):
+		""" Sets up the optimization program:
 			min c1*z + c2*Relu(z) over this zonotope
 
 		if apx_params is None, we return only a LOWER BOUND
@@ -331,12 +392,6 @@ class Zonotope(AbstractDomain):
 		"""
 		mip_dict = self._encode_mip()
 		model = mip_dict['model']
-
-		for k,v in (apx_params or {}).items():
-			model.setParam(k, v)
-
-		if verbose is False:
-			model.setParam('OutputFlag', False)
 
 
 		xs, ys = mip_dict['xs'], mip_dict['ys']
@@ -368,20 +423,40 @@ class Zonotope(AbstractDomain):
 			else:
 				all_relu_vars.append(relu_vars[idx])
 
-		model.setObjective(gb.LinExpr(c1, xs) + gb.LinExpr(c2, all_relu_vars),
-						   gb.GRB.MINIMIZE)
+
 		model.update()
 
-		# And solve and read solutions
+		return model, xs, all_relu_vars
+
+
+	def solve_relu_mip(self, c1, c2, apx_params=None, verbose=False):
+		# Setup the model (or load it if saved)
+		if self.keep_mip:
+			if self.relu_prog_model is None:
+				self.relu_prog_model = self._setup_relu_mip()
+			model, xs, relu_vars = self.relu_prog_model
+		else:
+			model, xs, relu_vars = self._setup_relu_mip()
+
+		# Encode the parameters
+		for k,v in (apx_params or {}).items():
+			model.setParam(k, v)
+
+		if verbose is False:
+			model.setParam('OutputFlag', False)
+
+		# Set the objective and optimize
+		model.setObjective(gb.LinExpr(c1, xs) + gb.LinExpr(c2, relu_vars),
+						   gb.GRB.MINIMIZE)
+		model.update()
 		model.optimize()
 
 		if apx_params is not None:
 			return model.ObjBound, model
 		obj = model.objVal
 		xvals = [_.x for _ in xs]
-		yvals = [_.x for _ in ys]
 
-		return obj, xvals, yvals, model
+		return obj, xvals, model
 
 
 	def k_group_relu(self, c1, c2, k=10):
@@ -395,7 +470,7 @@ class Zonotope(AbstractDomain):
 		zonos = self.partition(groups)
 
 		outputs = []
-		for z, g in zip(zonos, groups):
+		for z, g in zonos:
 			this_out = z.solve_relu_mip(c1[g], c2[g])
 			outputs.append(this_out[0])
 			opt_point[g] = torch.tensor(this_out[1])
@@ -554,5 +629,91 @@ class Polytope(AbstractDomain):
 
 
 
+#### Reimplementing polytopes
+
+class Polytope2(AbstractDomain):
+	def __init__(self, box_input):
+		self.box_bounds = {0: box_input}
+		self.model = gb.Model()
+		self.model.setParam('OutputFlag', False)
+
+		self.var_dict = {}
+		# Then create the input variables
+		box_0 = self.box_bounds[0]
+		input_vars = [self.model.addVar(lb=box_0.lbs[i], ub=box_0.ubs[i])
+					for i in range(box_0.lbs.numel())]
+		self.model.update()
+		self.var_dict[0] = input_vars
+
+
+	def map_linear(self, linear, layer_num):
+		input_vars = self.var_dict[layer_num - 1]
+		outbox = self.box_bounds[layer_num - 1].map_linear(linear)
+
+		output_vars = [self.model.addVar(lb=outbox.lbs[i], ub=outbox.ubs[i])
+					   for i in range(outbox.lbs.numel())]
+
+		self.model.update()
+		self.var_dict[layer_num] = output_vars
+
+
+		# Then add the constraints
+		for idx in range(linear.out_features):
+			rowvec = linear.weight[idx].data.cpu().numpy()
+			bias = linear.bias[idx].data
+			self.model.addConstr(gb.LinExpr(rowvec, input_vars) + bias == output_vars[idx])
+		self.model.update()
+
+		# And tighten the box constraint with a bunch of LP's here (for ReLU use later)
+		self._get_tighter_layer_bounds(layer_num)
+
+
+	def _get_tighter_layer_bounds(self, layer_num):
+		output_vars = self.var_dict[layer_num]
+		lbs = []
+		ubs = []
+		for idx, output_var in enumerate(output_vars):
+			self.model.setObjective(output_var, gb.GRB.MINIMIZE)
+			self.model.update()
+			self.model.optimize()
+			lbs.append(self.model.ObjVal)
+
+			self.model.setObjective(output_var, gb.GRB.MAXIMIZE)
+			self.model.update()
+			self.model.optimize()
+			ubs.append(self.model.ObjVal)
+
+		lbs, ubs = torch.tensor(lbs), torch.tensor(ubs)
+		self.box_bounds[layer_num] = Hyperbox(lbs, ubs)
+
+
+	def map_relu(self, layer_num):
+		input_vars = self.var_dict[layer_num - 1]
+		input_bounds = self.box_bounds[layer_num - 1]
+
+		output_vars = [self.model.addVar(lb=0, ub=ub) for ub in input_bounds.ubs]
+		self.model.update()
+		self.var_dict[layer_num] = output_vars
+
+		# Add constraints here
+		for idx, output_var in enumerate(output_vars):
+			lb, ub = input_bounds.lbs[idx], inputs.ubs[idx]
+
+			# Always 'off' case:
+			if ub < 0:
+				self.model.addConstr(output_var == 0)
+			elif lb >= 0:
+				self.model.addConstr(output_var == input_vars[idx])
+			else:
+				self.model.addConstr(output_var >= 0)
+				self.model.addConstr(output_var >= input_vars[idx])
+				slope = ub / (ub - lb)
+				intercept = -lb * slope
+
+				self.model.addConstr(output_var <= slope * input_vars[idx] + intercept)
+				self.model.update()
+
+
+		self._get_tighter_layer_bounds(layer_num)
 
 

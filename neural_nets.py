@@ -9,7 +9,7 @@ import torch.nn.functional as F
 import numpy as np
 import matplotlib.pyplot as plt
 
-from abstract_domains import Hyperbox, Zonotope, Polytope
+from abstract_domains import Hyperbox, Zonotope, Polytope, Polytope2
 
 
 class FFNet(nn.Module):
@@ -53,15 +53,15 @@ class FFNet(nn.Module):
 				        isinstance(layer, tuple(self.SUPPORTED_NONLINS))])
 
 	@classmethod
-	def relu_net(cls, sizes, dtype=torch.float):
+	def relu_net(cls, sizes, bias=False, dtype=torch.float):
 		# Creates a network with ReLU nonlinearities
 		seq_list = []
 		for idx in range(len(sizes) - 1):
 			shape_pair = (sizes[idx], sizes[idx + 1])
-			seq_list.append(nn.Linear(*shape_pair, bias=False, dtype=dtype))
+			seq_list.append(nn.Linear(*shape_pair, bias=bias, dtype=dtype))
 			if idx < len(sizes) -1:
-				seq_list.append(nn.ReLu())
-		return cls(nn.Sequential(seq_list), dtype=dtype)
+				seq_list.append(nn.ReLU())
+		return cls(nn.Sequential(*seq_list), dtype=dtype)
 
 	def binarize(self, i:int, j:int):
 		""" Turns this net into a binary classifier by constructing a new
@@ -141,9 +141,26 @@ class PreactBounds:
 		self.polytope = poly
 		self.computed = True
 
+	def compute_polytope2(self):
+		basic_bounds = PreactBounds(self.network, self.input_range, Hyperbox)
+		basic_bounds.compute()
+		poly2 = Polytope2(basic_bounds.bounds)
+		for i, layer in enumerate(self.network, start=1):
+			if isinstance(layer, nn.Linear):
+				poly2.map_linear(layer, i)
+			else:
+				poly2.map_relu(i)
+
+		self.bounds = poly.box_bounds
+		self.polytope = poly
+		self.computed = True
+
 	def compute(self):
 		if self.abstract_domain == Polytope:
 			return self.compute_polytope()
+
+		if self.abstract_domain == Polytope2:
+			return self.compute_polytope2()
 
 		if self.abstract_domain == Zonotope:
 			self.input_range = self.input_range.as_zonotope()

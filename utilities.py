@@ -1,6 +1,7 @@
 """ Utilities that are useful in general """
 import torch
 import matplotlib.pyplot as plt
+import random
 # =========================================================
 # =           Constructors and abstract classes           =
 # =========================================================
@@ -21,6 +22,10 @@ class ParameterObject:
 # ========================================================
 # =           Other helpful methods                      =
 # ========================================================
+
+def partition (list_in, n):
+    random.shuffle(list_in)
+    return [list_in[i::n] for i in range(n)]
 
 def complete_partition(groups, total):
 	""" If given an incomplete partition, creates the indices needed

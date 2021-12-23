@@ -286,7 +286,8 @@ class PGD:
 
 
 def load_mnist_data(train_or_val, batch_size=128, shuffle=True,
-					use_cuda=True, dataset_dir=DEFAULT_DATASET_DIR):
+					use_cuda=True, dataset_dir=DEFAULT_DATASET_DIR,
+					extra_transforms=None):
 	assert train_or_val in ['train', 'val']
 	use_cuda = torch.cuda.is_available() and use_cuda
 
@@ -296,6 +297,11 @@ def load_mnist_data(train_or_val, batch_size=128, shuffle=True,
 	               'pin_memory': use_cuda}
 
 	transform_chain = transforms.ToTensor()
+	if extra_transforms is not None:
+		if not isinstance(extra_transforms, list):
+			extra_transforms = [extra_transforms]
+		transform_chain = transforms.Compose([transform_chain] + extra_transforms)
+
 	MNIST_dataset = datasets.MNIST(root=dataset_dir,
 		 						   train=(train_or_val == 'train'),
 		 						   download=True,
