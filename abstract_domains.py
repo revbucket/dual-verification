@@ -597,28 +597,34 @@ class Zonotope(AbstractDomain):
 
         model.update()
 
-        return model, xs, all_relu_vars
+        return model, xs, ys, all_relu_vars
 
 
-    def solve_relu_mip(self, c1, c2, apx_params=None, verbose=False):
+    def solve_relu_mip(self, c1, c2, apx_params=None, verbose=False, simplex_start=True):
         # Setup the model (or load it if saved)
         if self.keep_mip:
             if self.relu_prog_model is None:
                 self.relu_prog_model = self._setup_relu_mip()
-            model, xs, relu_vars = self.relu_prog_model
+            model, xs, ys, relu_vars = self.relu_prog_model
         else:
-            model, xs, relu_vars = self._setup_relu_mip()
+            model, xs, ys, relu_vars = self._setup_relu_mip()
+
+        if verbose is False:
+            model.setParam('OutputFlag', False)
 
         # Encode the parameters
         for k,v in (apx_params or {}).items():
             model.setParam(k, v)
 
-        if verbose is False:
-            model.setParam('OutputFlag', False)
-
         # Set the objective and optimize
         model.setObjective(gb.LinExpr(c1, xs) + gb.LinExpr(c2, relu_vars),
                            gb.GRB.MINIMIZE)
+
+        if simplex_start:
+            y_start = self.solve_relu_simplex(c1, c2)[1]
+            for y, y_s in zip(ys, y_start):
+                y.Start = y_s.item()
+
         model.update()
         model.optimize()
 
