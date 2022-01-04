@@ -568,7 +568,7 @@ class Zonotope(AbstractDomain):
         xs, ys = mip_dict['xs'], mip_dict['ys']
 
         # Now add ReLU constraints, using the big-M encoding
-        unc_idxs = ((self.lbs * self.ubs) < 0).nonzero().squeeze()
+        unc_idxs = ((self.lbs * self.ubs) < 0).nonzero().squeeze(0)
         zs = []
         z_namer = namer('z') # integer variables
         relu_namer = namer('relu')
