@@ -628,12 +628,14 @@ class Zonotope(AbstractDomain):
         model.update()
         model.optimize()
 
+        xvals = torch.tensor([_.x for _ in xs])
+        yvals = torch.tensor([_.x for _ in ys])
+
         if apx_params is not None:
             return model.ObjBound, model
         obj = model.objVal
-        xvals = [_.x for _ in xs]
 
-        return obj, xvals, model
+        return obj, xvals, yvals, model
 
 
     def k_group_relu(self, c1, c2, k=10):
