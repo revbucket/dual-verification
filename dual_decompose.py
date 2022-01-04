@@ -196,6 +196,8 @@ class DecompDual:
             i_B, ip1_A = self.argmin_pi_zono(idx, lambdas=lambdas)
         elif self.choice == 'partition':
             i_B, ip1_A = self.argmin_pi_partition(idx, lambdas=lambdas)
+        elif self.choice == 'simplex':
+            i_B, ip1_A = self.argmin_pi_simplex(idx)
         else:
             raise NotImplementedError()
         return i_B, ip1_A
@@ -391,6 +393,19 @@ class DecompDual:
         return (argmin.data , self.network[idx + 1](F.relu(argmin)).data)
 
 
+    def argmin_pi_simplex(self, idx: int):
+        bounds = self.preact_bounds[idx]
+        lbs, ubs = bounds.lbs, bounds.ubs
+        c1, c2 = self._get_coeffs(idx)
+
+        # TODO: This is sus
+        c2 = c2.squeeze()
+        # print(f"{c1.shape}, {c2.shape}, {bounds.generator.shape}")
+
+        obj, yvals = bounds.solve_relu_simplex(c1, c2)
+        argmin = bounds(yvals)
+
+        return (argmin.data , self.network[idx + 1](F.relu(argmin)).data)
 
 
     def dual_ascent(self, num_steps: int, optim_obj=None, verbose=False,
@@ -433,7 +448,7 @@ class DecompDual:
             verbose : bool - prints stuff out if true
             logger: (optional) function that gets called at every iteration, takes self as arg
         """
-
+        raise NotImplementedError("This is hella broken... very complicated to fix I think")
         # Initialize things:
         # Assume dual variables already initialized
         primal = self.argmin()

@@ -195,6 +195,8 @@ class NaiveDual():
                     argmin.append(self.partition_zi(i)[1])
                 elif self.choice == 'fw':
                     argmin.append(torch.tensor(self.fw_zi(i)[1]))
+                elif self.choice == 'simplex':
+                    argmin.append(self.simplex_zi(i))
                 else:
                     argmin.append(self.naive_argmin_zi(i)[1])
         return [_.data for _ in argmin]
@@ -413,6 +415,22 @@ class NaiveDual():
             y = (1 - gamma) * y + gamma * s_plus(y)
         return f(y), zono(y)#, f(y)
 
+    # ------------------------------- SIMPLEX -------------------------------
+
+    def simplex_zi(self, idx: int):
+        assert idx % 2 == 1
+        bounds = self.preact_bounds[idx]
+        if idx == len(self.network):
+            obj = self.lambda_[idx - 1] + 1
+            return bounds.solve_lp(obj, True)[1]
+
+        assert isinstance(bounds, Zonotope)
+        obj, yvals = bounds.solve_relu_simplex(self.lambda_[idx - 1], -self.lambda_[idx])
+
+        # obj2, xvals2 = self.naive_argmin_zi(idx)
+        # print(obj2 - obj)
+
+        return bounds(yvals)
 
     # ------------------------- Exact MIP SOLUTION ---------------------------
 
