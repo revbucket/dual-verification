@@ -190,6 +190,8 @@ class DecompDual:
                     i_B, ip1_A = self.argmin_pi_zono(i)
                 elif self.choice == 'partition':
                     i_B, ip1_A = self.argmin_pi_partition(i)
+                elif self.choice == 'simplex':
+                    i_B, ip1_A = self.argmin_pi_simplex(i)
                 else:
                     raise NotImplementedError()
                 argmin[(i, 'B')] = i_B
@@ -343,6 +345,19 @@ class DecompDual:
         return (argmin.data , self.network[idx + 1](F.relu(argmin)).data)
 
 
+    def argmin_pi_simplex(self, idx: int):
+        bounds = self.preact_bounds[idx]
+        lbs, ubs = bounds.lbs, bounds.ubs
+        c1, c2 = self._get_coeffs(idx)
+
+        # TODO: This is sus
+        c2 = c2.squeeze()
+        # print(f"{c1.shape}, {c2.shape}, {bounds.generator.shape}")
+
+        obj, yvals = bounds.solve_relu_simplex(c1, c2)
+        argmin = bounds(yvals)
+
+        return (argmin.data , self.network[idx + 1](F.relu(argmin)).data)
 
 
     def dual_ascent(self, num_steps: int, optim_obj=None, verbose=False,

@@ -253,6 +253,35 @@ class Zonotope(AbstractDomain):
 		return f_prime(y), y, self(y)
 
 
+	def solve_relu_simplex(self, c1, c2, iters=3):
+		best_o, best_y = float('inf'), None
+
+		for _ in range(iters):
+			y = 2 * (torch.rand(self.generator.shape[1]) > 0.5).float() - 1
+			z = self(y)
+			o = c1 @ z + c2 @ F.relu(z)
+			G, b = self.generator, self.center
+
+			while True:
+				z = -2*G*y + (G@y + b)[None].T
+				n = c1 @ z + c2 @ F.relu(z)
+				m, i = n.min(0)
+				if o <= m: break
+				ya = y * (-2*(o - n > 0) + 1)
+				za = self(ya)
+				oa = c1 @ za + c2 @ F.relu(za)
+				if oa <= m:
+					o, y = oa, ya
+				else:
+					o = m
+					y[i] *= -1
+
+			if o < best_o:
+				best_o, best_y = o, y
+
+		return best_o, best_y
+
+
 	def make_random_partitions(self, num_parts):
 		groups = utils.partition(list(range(self.dim)), num_parts)
 		return self.partition(groups)
