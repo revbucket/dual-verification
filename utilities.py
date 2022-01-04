@@ -18,10 +18,61 @@ class ParameterObject:
 			self.attr_list.append(k)
 
 
+def no_grad(f):
+	def dec_fxn(*args, **kwargs):
+		with torch.no_grad():
+			return f(*args, **kwargs)
+	return dec_fxn
+
 
 # ========================================================
 # =           Other helpful methods                      =
 # ========================================================
+
+def conv_indexer(input_shape):
+	""" Makes dicts that map from:
+			(C,H,W) -> index list
+			index_list -> (C,H,W)
+	"""
+	if len(input_shape) == 4:
+		input_shape = input_shape[1:]
+	C, H, W = input_shape
+	numel = C * H * W
+	idx_to_tup = {}
+	i = 0
+	for c in range(C):
+		for h in range(H):
+			for w in range(W):
+				idx_to_tup[i] = (c, h, w)
+				i +=1
+	tup_to_idx = {v: k for k, v in idx_to_tup.items()}
+	return tup_to_idx, idx_to_tup
+
+
+def flatten(lol):
+    output = []
+    def subflatten(sublist, output=output):
+        for el in sublist:
+            if hasattr(el, '__iter__'):
+                subflatten(el)
+            else:
+                output.append(el)
+    subflatten(lol)
+    return output
+
+
+def conv_view(els, shape):
+	""" Maps 1d list into shape """
+	if len(shape) == 4:
+		shape = shape[1:]
+
+	C, H, W = shape
+	rows = [els[i:i+W] for i in range(0, len(els), W)]
+	channels = [rows[i: i+H] for i in range(0, len(rows), H)]
+	return channels
+
+
+
 
 def partition (list_in, n):
     random.shuffle(list_in)

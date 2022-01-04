@@ -182,42 +182,51 @@ class DecompDual:
 
 
 
-    def argmin(self):
+    def argmin(self, lambdas=None):
         argmin = OrderedDict()
         for i, layer in enumerate(self.network):
             if isinstance(layer, nn.ReLU):
-                if self.choice == 'naive':
-                    i_B, ip1_A = self.argmin_pi_zono(i)
-                elif self.choice == 'partition':
-                    i_B, ip1_A = self.argmin_pi_partition(i)
-                else:
-                    raise NotImplementedError()
+                i_B, ip1_A = self.argmin_idx(i, lambdas=lambdas)
                 argmin[(i, 'B')] = i_B
                 argmin[(i+2, 'A')] = ip1_A
         return argmin
 
+    def argmin_idx(self, idx, lambdas=None):
+        if self.choice == 'naive':
+            i_B, ip1_A = self.argmin_pi_zono(idx, lambdas=lambdas)
+        elif self.choice == 'partition':
+            i_B, ip1_A = self.argmin_pi_partition(idx, lambdas=lambdas)
+        else:
+            raise NotImplementedError()
+        return i_B, ip1_A
 
-    def _get_coeffs(self, idx: int):
+
+
+
+    def _get_coeffs(self, idx: int, lambdas=None):
         """ Gets the coeficients to be used in ReLU programming
         RETURNS: (lin_coeff, relu_coeff)
+        lambdas: Non
         """
+
+        lambdas = self.lambda_ if (lambdas is None) else lambdas
         if idx == 1:
             # Special case
             # Min lambda_2 @ A2 (Relu(Z_1A))
             # over the set Z1A in A1(X)
             lin_coeff = torch.zeros_like(self.preact_bounds[idx].lbs)
-            relu_coeff = self.network[idx + 1].weight.T @ self.lambda_[idx + 2]
+            relu_coeff = self.network[idx + 1].weight.T @ lambdas[idx + 2]
 
         elif idx < len(self.network) - 2:
-            lin_coeff = -self.lambda_[idx]
-            relu_coeff = self.network[idx + 1].weight.T @ self.lambda_[idx + 2]
+            lin_coeff = -lambdas[idx]
+            relu_coeff = self.network[idx + 1].weight.T @ lambdas[idx + 2]
         else:
-            lin_coeff = -self.lambda_[idx]
+            lin_coeff = -lambdas[idx]
             relu_coeff = self.network[idx + 1].weight.T
         return lin_coeff, relu_coeff
 
 
-    def argmin_pi(self, idx: int):
+    def argmin_pi(self, idx: int, lambdas=None):
         """ Gets the argmin for the i^th p_i loop.
             This is indexed where the ReLU's are.
         """
@@ -228,7 +237,7 @@ class DecompDual:
         # Define the objectives to solve over
         # In general we have
         # Min_Z   c1 @ z + c2 @ relu(z)
-        lin_coeff, relu_coeff = self._get_coeffs(idx)
+        lin_coeff, relu_coeff = self._get_coeffs(idx, lambdas=lambdas)
 
 
         argmin = torch.clone(bounds.center)
@@ -236,10 +245,10 @@ class DecompDual:
         for coord in range(len(lbs)):
             if lbs[coord] > 0: # relu always on
                 obj = lin_coeff[coord] + relu_coeff[coord]
-                argmin[coord] -= torch.sign(obj) * rad[coord]
+                argmin[coord] -= (torch.sign(obj) * rad[coord]).item()
             elif ubs[coord] < 0:  # relu always off
                 obj = lin_coeff[coord]
-                argmin[coord] -= torch.sign(obj) * rad[coord]
+                argmin[coord] -= (torch.sign(obj) * rad[coord]).item()
             else:
                 eval_at_l = lin_coeff[coord] * lbs[coord]
                 eval_at_u = (lin_coeff[coord] + relu_coeff[coord]) * ubs[coord]
@@ -249,16 +258,16 @@ class DecompDual:
 
         return (argmin.data, self.network[idx + 1](F.relu(argmin)).data)
 
-    def argmin_pi_zono(self, idx: int):
+    def argmin_pi_zono(self, idx: int, lambdas=None):
 
         bounds = self.preact_bounds[idx]
         if not isinstance(bounds, Zonotope):
-            return self.argmin_pi(idx)
+            return self.argmin_pi(idx, lambdas=lambdas)
 
         assert isinstance(self.network[idx], nn.ReLU)
         lbs, ubs = bounds.lbs, bounds.ubs
         ## LAYERWISE STUFF HERE: Compute the objective vector
-        lin_coeff, relu_coeff = self._get_coeffs(idx)
+        lin_coeff, relu_coeff = self._get_coeffs(idx, lambdas=lambdas)
 
         ## Now do the more clever zonotope thing
         #  We separate into fixed-relu and non-fixed settings
@@ -295,6 +304,7 @@ class DecompDual:
     def _default_partition_kwargs(self):
         return {'num_partitions': 10,
                 'partition_style': 'random', # vs 'fixed'
+                'partition_rule': 'random',
                 'partitions': None, # subzonos stored here
                }
 
@@ -307,11 +317,47 @@ class DecompDual:
         self.partition_kwargs['num_partitions'] = num_groups
 
 
+    def make_partitions(self, idx, lambdas=None):
+        kwargs = self.partition_kwargs
+        bounds = self.preact_bounds[idx]
 
-    def argmin_pi_partition(self, idx: int):
+        if kwargs['partition_rule'] == 'random':
+            return bounds.make_random_partitions(kwargs['num_partitions'])
+        elif kwargs['partition_rule'] ==  'min_val':
+            c1, c2 = self._get_coeffs(idx, lambdas=lambdas)
+
+            # Score choices to use
+            def min_val(zono, i, c1=c1, c2=c2):
+                # Takes zonotope and dimension i, outputs float
+                half_len = zono.generator[i].abs().sum()
+                interval = [zono.center[i] - half_len, zono.center[i] + half_len]
+                if interval[0] <= 0 <= interval[1]:
+                    interval.append(0.0)
+                relu = lambda x: max([x, 0.0])
+                return min([c1[i] * el + c2[i] * relu(el) for el in interval])
+            return bounds.make_scored_partition(kwargs['num_partitions'], min_val)
+
+        elif kwargs['partition_rule'] == 'minmax_val':
+            c1, c2 = self._get_coeffs()
+            def minmax_val(zono, i, c1=c1, c2=c2):
+                # Takes zonotope and dimension i, outputs float
+                half_len = zono.generator[i].abs().sum()
+                interval = [zono.center[i] - half_len, zono.center[i] + half_len]
+                if interval[0] <= 0 <= interval[1]:
+                    interval.append(0.0)
+                relu = lambda x: max([x, 0.0])
+                return max([c1[i] * el + c2[i] * relu(el) for el in interval]) -\
+                       min([c1[i] * el + c2[i] * relu(el) for el in interval])
+        else:
+            raise NotImplementedError()
+
+
+
+
+    def argmin_pi_partition(self, idx: int, lambdas=None):
         bounds = self.preact_bounds[idx]
         lbs, ubs = bounds.lbs, bounds.ubs
-        c1, c2 = self._get_coeffs(idx)
+        c1, c2 = self._get_coeffs(idx, lambdas=lambdas)
 
 
         # Partition generation
@@ -324,6 +370,8 @@ class DecompDual:
             if kwargs.get('partitions', None) is None:
                 kwargs['partitions'] = {}
             if kwargs['partitions'].get(idx, None) is None:
+                kwargs
+
                 kwargs['partitions'][idx] = bounds.make_random_partitions(kwargs['num_partitions'])
             partitions = kwargs['partitions'][idx]
 
@@ -371,4 +419,58 @@ class DecompDual:
 
 
         return self.lagrangian(self.argmin())
+
+
+
+    def proximal_method(self, num_steps, num_inner_steps, eta_k=None, optim_obj=None, verbose=False,
+                        logger=None):
+        """ Runs the proximal method for dual ascent updates -- maybe this is better?
+        ARGS:
+            num_steps: int - number of outer steps to perform
+            num_inner_steps: int - number of inner steps for each outer step
+            eta_k : (int -> float) -  function that maps step k to eta value
+            optim_obj: ???
+            verbose : bool - prints stuff out if true
+            logger: (optional) function that gets called at every iteration, takes self as arg
+        """
+
+        # Initialize things:
+        # Assume dual variables already initialized
+        primal = self.argmin()
+
+        convex_combo = lambda old, new, gamma: gamma * new + (1 - gamma) * old
+
+        if isinstance(eta_k, (float, int)): #number becomes constant fxn
+            eta_k = lambda k: eta_k
+
+
+        lambdas = [_ for _ in self.lambda_] # shallow copy here
+        for step in range(num_steps):
+            inner_lambdas = [_ for _ in lambdas]
+            for inner_step in range(num_inner_steps):
+                # Do block coordinate updates
+                for idx, layer in enumerate(self.network):
+                    if not isinstance(layer, nn.ReLU):
+                        continue
+                    if i > 1: # zonotopes don't need i=1 case
+                        inner_lambdas[idx] = lambdas[idx] + (primal[(idx, 'A')] - primal[(idx, 'B')]) / eta(idx)
+                    i_B, ip1_A = self.argmin_idx(idx, lambdas=inner_lambdas)
+                    step_size = self._get_opt_fw_step(primal, i_B, ip1_A, eta_k, idx)
+
+                    primal[(idx, 'B')] = convex_combo(primal[idx], i_B, step_size)
+                    primal[(idx + 2, 'A')] = convex_combo(primal[idx], ip1_A, step_size)
+
+            lambdas = self._update_fw_lambdas(primals, lambdas, eta_k)
+
+
+    def _get_opt_fw_step(self, primal, eta_k, idx):
+        # Gets gamma in [0,1] for val
+        return 0.5
+        pass
+
+    def _update_fw_lambdas(self, primals, lambdas, eta_k):
+
+        pass
+
+
 

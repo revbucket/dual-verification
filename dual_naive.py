@@ -214,13 +214,12 @@ class NaiveDual():
         """
 
         if optim_obj is None:
-            optim_obj = optim.Adam(self.lambda_, lr=1e-3)
+            optim_obj = optim.Adam(self.parameters(), lr=1e-3)
 
         logger = (lambda x: None) if (logger is None) else logger
         for step in range(num_steps):
             logger(self)
             optim_obj.zero_grad()
-
             l_val = -self.lagrangian(self.argmin()) # negate to ASCEND
             l_val.backward()
             optim_obj.step()
@@ -325,19 +324,27 @@ class NaiveDual():
             obj = self.lambda_[idx - 1] + 1
             return bounds.solve_lp(obj, True)
         lbs, ubs = bounds.lbs, bounds.ubs
+        dim = lbs.numel()
 
         # Partition generation
         if self.partition_kwargs is None:
             self.partition_kwargs = self._default_partition_kwargs()
-
         kwargs = self.partition_kwargs
+
+        # Random partition
+
+        num_parts = kwargs.get('num_partitions', None)
+        if num_parts is None:
+            part_dim = kwargs.get('partition_dim')
+            num_parts = dim // part_dim
+
         if kwargs['partition_style'] == 'random':
-            partitions = bounds.make_random_partitions(kwargs['num_partitions'])
+            partitions = bounds.make_random_partitions(num_parts)
         else:
             if kwargs.get('partitions', None) is None:
                 kwargs['partitions'] = {}
             if kwargs['partitions'].get(idx, None) is None:
-                kwargs['partitions'][idx] = bounds.make_random_partitions(kwargs['num_partitions'])
+                kwargs['partitions'][idx] = bounds.make_random_partitions(num_parts)
             partitions = kwargs['partitions'][idx]
 
         # Partition optimization
