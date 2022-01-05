@@ -9,6 +9,7 @@ import itertools
 import math
 import copy
 import numpy as np
+import scipy.optimize
 
 class AbstractDomain:
     """ Abstract class that handles forward passes """
@@ -353,6 +354,7 @@ class Zonotope(AbstractDomain):
             y = (1 - gamma) * y + gamma * s_plus(y)
         return f_prime(y), y, self(y)
 
+
     def solve_relu_simplex(self, c1, c2, iters=3):
         best_o, best_y = float('inf'), None
 
@@ -382,6 +384,53 @@ class Zonotope(AbstractDomain):
         return best_o, best_y
 
 
+    def solve_relu_fw(self, c1, c2, num_iter=10000):
+        return self.fw(lambda x: c1 @ x + c2 @ F.relu(x), num_iter)
+
+
+    def solve_relu_lbfgsb(self, c1, c2, iters=1, start="simplex", simplex_iters=None):
+        g = self.generator.shape[1]
+        # NOTE: this is important, otherwise we'll end up backpropping
+        # through the outer optimization graph
+        c1, c2 = c1.detach(), c2.detach()
+
+        def f(y):
+            x = self(y)
+            return c1 @ x + c2 @ F.relu(x)
+
+        def value_and_grad(y):
+            y = torch.from_numpy(y).float().detach().requires_grad_()
+            out = f(y)
+            out.backward()
+            return out.item(), y.grad.numpy().astype(np.double)
+
+        best_o, best_y = float('inf'), None
+
+        for _ in range(iters):
+            if start == "zero":
+                y0 = np.zeros(g)
+                assert iters == 1
+            elif start == "simplex":
+                kwargs = {"iters": simplex_iters} if simplex_iters is not None else {}
+                sopt, sy = self.solve_relu_simplex(c1, c2, **kwargs)
+                y0 = sy.double().numpy()
+            elif start == "random":
+                y0 = 2 * (np.random.rand(g) > 0.5) - 1,
+            else:
+                raise NotImplementedError()
+
+            opt = scipy.optimize.minimize(
+                value_and_grad,
+                y0,
+                method="L-BFGS-B",
+                jac=True,
+                bounds=scipy.optimize.Bounds(np.full(g, -1), np.full(g, 1)),
+            )
+
+            if opt.fun < best_o:
+                best_o, best_y = opt.fun, opt.x
+
+        return torch.tensor(best_o), torch.from_numpy(best_y).float().detach()
 
     def make_random_partitions(self, num_parts):
         groups = utils.partition(list(range(self.dim)), num_parts)
@@ -600,7 +649,7 @@ class Zonotope(AbstractDomain):
         return model, xs, ys, all_relu_vars
 
 
-    def solve_relu_mip(self, c1, c2, apx_params=None, verbose=False, simplex_start=True):
+    def solve_relu_mip(self, c1, c2, apx_params=None, verbose=False, start="lbfgsb", start_kwargs={}):
         # Setup the model (or load it if saved)
         if self.keep_mip:
             if self.relu_prog_model is None:
@@ -620,8 +669,16 @@ class Zonotope(AbstractDomain):
         model.setObjective(gb.LinExpr(c1, xs) + gb.LinExpr(c2, relu_vars),
                            gb.GRB.MINIMIZE)
 
-        if simplex_start:
-            y_start = self.solve_relu_simplex(c1, c2)[1]
+        if start is not None:
+            if start == "simplex":
+                y_start = self.solve_relu_simplex(c1, c2, **start_kwargs)[1]
+            elif start == "fw":
+                y_start = self.solve_relu_fw(c1, c2, **start_kwargs)[1]
+            elif start == "lbfgsb":
+                y_start = self.solve_relu_lbfgsb(c1, c2, **start_kwargs)[1]
+            else:
+                raise NotImplementedError()
+
             for y, y_s in zip(ys, y_start):
                 y.Start = y_s.item()
 
