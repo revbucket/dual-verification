@@ -436,6 +436,12 @@ class Zonotope(AbstractDomain):
         groups = utils.partition(list(range(self.dim)), num_parts)
         return self.partition(groups)
 
+    def make_random_partitions_dim(self, partition_dim):
+        num_parts = math.ceil(self.dim / partition_dim)
+        return self.make_random_partitions(num_parts)
+
+
+
     def make_scored_partitions(self, num_parts, score_fxn):
         dim = self.generator.shape[0]
         size = math.ceil(dim / num_parts)
