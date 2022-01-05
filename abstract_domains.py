@@ -641,7 +641,7 @@ class Zonotope(AbstractDomain):
         zonos = self.partition(groups)
 
         outputs = []
-        for z, g in zonos:
+        for g, z in zonos:
             this_out = z.solve_relu_mip(c1[g], c2[g])
             outputs.append(this_out[0])
             opt_point[g] = torch.tensor(this_out[1])
