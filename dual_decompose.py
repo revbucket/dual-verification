@@ -198,6 +198,8 @@ class DecompDual:
             i_B, ip1_A = self.argmin_pi_partition(idx, lambdas=lambdas)
         elif self.choice == 'simplex':
             i_B, ip1_A = self.argmin_pi_simplex(idx)
+        elif self.choice == 'lbfgsb':
+            i_B, ip1_A = self.argmin_pi_lbfgsb(idx)
         else:
             raise NotImplementedError()
         return i_B, ip1_A
@@ -403,6 +405,21 @@ class DecompDual:
         # print(f"{c1.shape}, {c2.shape}, {bounds.generator.shape}")
 
         obj, yvals = bounds.solve_relu_simplex(c1, c2)
+        argmin = bounds(yvals)
+
+        return (argmin.data , self.network[idx + 1](F.relu(argmin)).data)
+
+
+    def argmin_pi_lbfgsb(self, idx: int):
+        bounds = self.preact_bounds[idx]
+        lbs, ubs = bounds.lbs, bounds.ubs
+        c1, c2 = self._get_coeffs(idx)
+
+        # TODO: This is sus
+        c2 = c2.squeeze()
+        # print(f"{c1.shape}, {c2.shape}, {bounds.generator.shape}")
+
+        obj, yvals = bounds.solve_relu_lbfgsb(c1, c2)
         argmin = bounds(yvals)
 
         return (argmin.data , self.network[idx + 1](F.relu(argmin)).data)

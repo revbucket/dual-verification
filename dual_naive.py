@@ -197,6 +197,8 @@ class NaiveDual():
                     argmin.append(torch.tensor(self.fw_zi(i)[1]))
                 elif self.choice == 'simplex':
                     argmin.append(self.simplex_zi(i))
+                elif self.choice == 'lbfgsb':
+                    argmin.append(self.lbfgsb_zi(i))
                 else:
                     argmin.append(self.naive_argmin_zi(i)[1])
         return [_.data for _ in argmin]
@@ -429,6 +431,21 @@ class NaiveDual():
 
         # obj2, xvals2 = self.naive_argmin_zi(idx)
         # print(obj2 - obj)
+
+        return bounds(yvals)
+
+    # ------------------------------- L-BFGS-B -------------------------------
+
+    def lbfgsb_zi(self, idx: int):
+        assert idx % 2 == 1
+        bounds = self.preact_bounds[idx]
+        if idx == len(self.network):
+            obj = self.lambda_[idx - 1] + 1
+            return bounds.solve_lp(obj, True)[1]
+
+        assert isinstance(bounds, Zonotope)
+        obj, yvals = bounds.solve_relu_lbfgsb(self.lambda_[idx - 1], -self.lambda_[idx])
+
 
         return bounds(yvals)
 
