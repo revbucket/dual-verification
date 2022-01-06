@@ -97,6 +97,51 @@ class Hyperbox(AbstractDomain):
         return opt_val
 
 
+    def solve_relu_program(self, lin_obj, relu_obj, get_argmin: bool= False):
+        """ Solves ReLU program like min lin_obj @x + relu_obj @Relu(x) over hyperbox
+        ARGS:
+            lin_obj : objective vector for linear term
+            relu_obj : objective vector for relu term
+        RETURNS: either optimal_value or (optimal_value, optimal_point)
+        """
+
+        argmin = torch.clone(self.center)
+
+        # Handle lb >0 case
+        pos_idxs = self.lbs > 0
+        sum_obj = lin_obj + relu_obj
+        argmin[pos_idxs] = torch.where(sum_obj[pos_idxs] >= 0, self.lbs[pos_idxs], self.ubs[pos_idxs])
+
+        # Handle ub < 0 case
+        neg_idxs = self.ubs < 0
+        argmin[neg_idxs] = torch.where(lin_obj[neg_idxs] >= 0, self.lbs[neg_idxs], self.ubs[neg_idxs])
+
+        # Handle ambiguous case
+        ambig_idxs = (~(pos_idxs + neg_idxs)).nonzero()
+
+        argmin_ambig = argmin[ambig_idxs]
+        lbs_ambig = self.lbs[ambig_idxs]
+        ubs_ambig = self.ubs[ambig_idxs]
+        lin_ambig = lin_obj[ambig_idxs]
+        relu_ambig = relu_obj[ambig_idxs]
+
+        eval_at_l = lin_ambig * lbs_ambig
+        eval_at_u = (lin_ambig + relu_ambig) * ubs_ambig
+        eval_at_0 = torch.zeros_like(eval_at_l)
+        min_idxs = torch.stack([eval_at_l, eval_at_u, eval_at_0]).min(dim=0)[1]
+        argmin[ambig_idxs[min_idxs == 0]] = lbs_ambig[min_idxs == 0]
+        argmin[ambig_idxs[min_idxs == 1]] = ubs_ambig[min_idxs == 1]
+        argmin[ambig_idxs[min_idxs == 2]] = 0.0
+
+        # Compute optimal value and return
+        opt_val = lin_obj @ argmin + relu_obj @ torch.relu(argmin)
+        if get_argmin:
+            return opt_val, argmin
+        return opt_val
+
+
+
+
     # =============================================
     # =           Pushforward Operators           =
     # =============================================
@@ -127,6 +172,9 @@ class Hyperbox(AbstractDomain):
 
         return Hyperbox.linf_box(torch.flatten(new_center),
                                  torch.flatten(new_rad))
+
+
+
 
 
 

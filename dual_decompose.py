@@ -193,7 +193,8 @@ class DecompDual:
 
     def argmin_idx(self, idx, lambdas=None):
         if self.choice == 'naive':
-            i_B, ip1_A = self.argmin_pi_zono(idx, lambdas=lambdas)
+            #i_B, ip1_A = self.argmin_pi_zono(idx, lambdas=lambdas)
+            i_B, ip1_A = self.argmin_pi_noloop(idx, lambdas=lambdas)
         elif self.choice == 'partition':
             i_B, ip1_A = self.argmin_pi_partition(idx, lambdas=lambdas)
         elif self.choice == 'simplex':
@@ -223,10 +224,10 @@ class DecompDual:
 
         elif idx < len(self.network) - 2:
             lin_coeff = -lambdas[idx]
-            relu_coeff = self.network[idx + 1].weight.T @ lambdas[idx + 2]
+            relu_coeff = (self.network[idx + 1].weight.T @ lambdas[idx + 2])
         else:
             lin_coeff = -lambdas[idx]
-            relu_coeff = self.network[idx + 1].weight.T
+            relu_coeff = self.network[idx + 1].weight.T.squeeze()
         return lin_coeff, relu_coeff
 
 
@@ -303,6 +304,39 @@ class DecompDual:
         argmin[fixed_idxs] = fixed_argmin[fixed_idxs]
 
         return (argmin.data, self.network[idx + 1](F.relu(argmin)).data)
+
+
+    def argmin_pi_noloop(self, idx: int, lambdas=None):
+        bounds = self.preact_bounds[idx]
+        assert isinstance(self.network[idx], nn.ReLU)
+        lbs, ubs = bounds.lbs, bounds.ubs
+        lin_coeff, relu_coeff = self._get_coeffs(idx, lambdas=lambdas)
+
+        if isinstance(bounds, Hyperbox):
+            argmin = bounds.solve_relu_program(lin_coeff, relu_coeff, get_argmin=True)[1]
+            return argmin.data, self.network[idx + 1](torch.relu(argmin)).data
+
+
+        # Then partition into stable and unstable cases... and do zonotope
+        stable_obj = torch.zeros_like(bounds.lbs)
+        on_coords = (bounds.lbs >= 0)
+        off_coords = (bounds.ubs < 0)
+        ambig_coords = ~(on_coords + off_coords)
+
+        stable_obj[on_coords] = lin_coeff[on_coords] + relu_coeff[on_coords]
+        stable_obj[off_coords] = lin_coeff[off_coords]
+
+        argmin = bounds.solve_lp(stable_obj, get_argmin=True)[1]
+
+        # Then do the hyperbox for the rest
+        ambig_box = Hyperbox(bounds.lbs[ambig_coords], bounds.ubs[ambig_coords])
+        ambig_argmin = ambig_box.solve_relu_program(lin_coeff[ambig_coords],
+                                                    relu_coeff[ambig_coords],
+                                                    get_argmin=True)[1]
+        argmin[ambig_coords] = ambig_argmin
+        return argmin.data, self.network[idx + 1](torch.relu(argmin)).data
+
+
 
 
     def _default_partition_kwargs(self):

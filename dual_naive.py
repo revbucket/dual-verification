@@ -200,7 +200,8 @@ class NaiveDual():
                 elif self.choice == 'lbfgsb':
                     argmin.append(self.lbfgsb_zi(i))
                 else:
-                    argmin.append(self.naive_argmin_zi(i)[1])
+                    #argmin.append(self.naive_argmin_zi(i)[1])
+                    argmin.append(self.naive_argmin_zi_noloop(i)[1])
         return [_.data for _ in argmin]
 
 
@@ -301,6 +302,44 @@ class NaiveDual():
 
         min_val = self.lambda_[idx -1] @ argmin - self.lambda_[idx] @ torch.relu(argmin)
         return min_val, argmin
+
+
+    def naive_argmin_zi_noloop(self, idx: int):
+        assert idx % 2 == 1
+        bounds = self.preact_bounds[idx]
+        if idx == len(self.network):
+            obj = self.lambda_[idx - 1] + 1
+            return bounds.solve_lp(obj, get_argmin=True)
+
+        lin_obj = self.lambda_[idx - 1]
+        relu_obj = -self.lambda_[idx]
+
+        # Easy hyperbox case
+        if isinstance(bounds, Hyperbox):
+            return bounds.solve_relu_program(lin_obj, relu_obj, get_argmin=True)
+
+        # Then partition into stable and unstable cases... and do zonotope
+        stable_obj = torch.zeros_like(bounds.lbs)
+        on_coords = (bounds.lbs >= 0)
+        off_coords = (bounds.ubs < 0)
+        ambig_coords = ~(on_coords + off_coords)
+
+        stable_obj[on_coords] = lin_obj[on_coords] + relu_obj[on_coords]
+        stable_obj[off_coords] = lin_obj[off_coords]
+
+        argmin = bounds.solve_lp(stable_obj, get_argmin=True)[1]
+
+        # Then do the hyperbox for the rest
+        ambig_box = Hyperbox(bounds.lbs[ambig_coords], bounds.ubs[ambig_coords])
+        ambig_argmin = ambig_box.solve_relu_program(lin_obj[ambig_coords],
+                                                    relu_obj[ambig_coords],
+                                                    get_argmin=True)[1]
+        argmin[ambig_coords] = ambig_argmin
+
+        opt_val = lin_obj @ argmin + relu_obj @ torch.relu(argmin)
+
+        return opt_val, argmin
+
 
 
     #--------------------------PARTITION STUFF ----------------------------------
