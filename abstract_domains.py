@@ -768,6 +768,97 @@ class Zonotope(AbstractDomain):
         return sum(outputs), opt_point
 
 
+    # =======================================================
+    # =           2 Dimensional Partition blocks            =
+    # =======================================================
+
+    def enumerate_vertices_2d(self):
+        # Returns (2*gensize, 2) tensor of vertices for this zono
+        assert self.dim == 2
+        left_point = self(-torch.sign(self.generator[0]))
+        # Sort and orient the slopes
+        slopes = self.generator[1] / self.generator[0]
+        sorted_idxs = torch.sort(slopes)[1]
+        orient_gen = self.generator * torch.sign(self.generator[0]).view(1,-1)
+        shuffle_gen = orient_gen[:, sorted_idxs]
+        cumsum_gen = 2 * shuffle_gen.cumsum(dim=1)
+        pos_vs = left_point.view(1, -1) + cumsum_gen.T
+        neg_vs = 2 * self.center.view(1, -1) - pos_vs
+        return torch.cat([pos_vs, neg_vs])
+
+    def relu_program_2d(self, c1, c2):
+        """ Returns (min_val, argmin) for 2d relu program
+        NOTE: does not consider axes vals!
+        """
+        vs = self.enumerate_vertices_2d()
+        vals = vs @ c1 + torch.relu(vs) @ c2
+        min_val, argmin_idx = torch.min(vals, dim=0)
+        return min_val, vs[argmin_idx]
+
+
+    def batch_2d_partition(self, groups=None):
+        """ Enumerates vertices based on groups
+        ARGS:
+            groups: is a tensor of [[group1.x, group1.x], ...]
+        RETURNS:
+            tensor of shape (num_groups, 2, 2*gensize)
+        """
+        assert self.dim % 2 == 0
+        if groups is None:
+            groups = torch.rand(self.dim).sort()[1].view(-1, 2)
+        xs = groups[:,0]
+        ys = groups[:,1]
+        center, generator = self.center, self.generator
+
+        signs = torch.sign(generator[xs,:])
+        sign_gen = torch.ones_like(generator)
+        sign_gen[xs,:] = signs
+        sign_gen[ys,:] = signs
+
+        lefts = center - (generator * sign_gen).sum(dim=1)
+
+        # Slopes now...
+        slopes = generator[ys, :] / generator[xs,:]
+        sorted_idxs = torch.sort(slopes, dim=1)[1] # (groups, gensize)
+
+        # And now split for xs, ys (easier to reason about gather and such)
+        orient_gen = sign_gen * generator
+        shuffle_xs = orient_gen[xs,:].gather(1, sorted_idxs)
+        shuffle_ys = orient_gen[ys,:].gather(1, sorted_idxs)
+
+        cumsum_xs = 2 * shuffle_xs.cumsum(dim=1)
+        cumsum_ys = 2 * shuffle_ys.cumsum(dim=1)
+
+        pos_vx = lefts[xs].view(-1, 1) + cumsum_xs
+        pos_vy = lefts[ys].view(-1, 1) + cumsum_ys
+
+        neg_vx = 2 * center[xs].view(-1, 1) - pos_vx
+        neg_vy = 2 * center[ys].view(-1, 1) - pos_vy
+
+
+        # Output is (#Groups, 2, #vertices)
+        return torch.stack([torch.cat([pos_vx, neg_vx], dim=1),
+                            torch.cat([pos_vy, neg_vy], dim=1)], dim=1)
+
+    def batch_2d_relu_program(self, c1, c2, groups=None):
+        """ Solves relu program by partition into groups of 2d
+            e.g. min c1*z + c2*relu(z)
+        ARGS:
+            c1,c2: tensor for objective vector
+            groups: groups arg to be fed into batch_2d_partition
+        RETURNS:
+            min_val, argmin
+        """
+        group_vs = self.batch_2d_partition(groups=groups)
+        obj_vals = (c1[groups].unsqueeze(-1) * group_vs +
+                    c2[groups].unsqueeze(-1) * torch.relu(group_vs))
+        mins, min_idxs = obj_vals.sum(dim=1).min(dim=1)
+
+        argmin = torch.zeros_like(self.center)
+        argmin[groups[:,0]] = torch.gather(group_vs[:,0,:], 1, min_idxs.view(-1, 1)).squeeze()
+        argmin[groups[:,1]] = torch.gather(group_vs[:,1,:], 1, min_idxs.view(-1, 1)).squeeze()
+        return mins.sum(), argmin
+
 # ========================================================
 # =                      POLYTOPES                       =
 # ========================================================

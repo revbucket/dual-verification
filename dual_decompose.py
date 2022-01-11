@@ -29,6 +29,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
+import time
 from typing import List
 from collections import OrderedDict
 from neural_nets import FFNet, PreactBounds
@@ -473,6 +474,7 @@ class DecompDual:
         if optim_obj is None:
             optim_obj = optim.Adam(self.parameters(),
                                   lr=1e-3)
+        last_time = time.time()
         logger = logger or (lambda x: None)
         for step in range(num_steps):
             logger(self)
@@ -480,7 +482,9 @@ class DecompDual:
             l_val = -self.lagrangian(self.argmin()) # negate to ASCEND
             l_val.backward()
             if verbose and (step % verbose) == 0:
-                print("Iter %02d | Certificate: %.02f" % (step, -l_val))
+
+                print("Iter %02d | Certificate: %.02f  | Time: %.02f" % (step, -l_val, time.time() - last_time))
+                last_time = time.time()
             optim_obj.step()
 
 

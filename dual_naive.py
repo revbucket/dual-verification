@@ -53,7 +53,8 @@ from collections import defaultdict, OrderedDict
 class NaiveDual():
 
     def __init__(self, network, input_domain, preact_domain=Hyperbox,
-                 prespec_bounds=None, choice='naive', partition_kwargs=None):
+                 prespec_bounds=None, choice='naive', partition_kwargs=None,
+                 two_d_kwargs=None):
         """
         Main dual object:
         ARGS:
@@ -86,6 +87,7 @@ class NaiveDual():
         # Parameters regarding z_i calculation
         self.choice = choice
         self.partition_kwargs = partition_kwargs
+        self.two_d_kwargs = two_d_kwargs
 
         # Initialize dual variables
         self.lambda_ = []
@@ -199,6 +201,8 @@ class NaiveDual():
                     argmin.append(self.simplex_zi(i))
                 elif self.choice == 'lbfgsb':
                     argmin.append(self.lbfgsb_zi(i))
+                elif self.choice == '2d_zono':
+                    argmin.append(self.zono_2d_zi(i)[1])
                 else:
                     #argmin.append(self.naive_argmin_zi(i)[1])
                     argmin.append(self.naive_argmin_zi_noloop(i)[1])
@@ -343,6 +347,7 @@ class NaiveDual():
 
 
     #--------------------------PARTITION STUFF ----------------------------------
+
     def _default_partition_kwargs(self):
         return {'num_partitions': 10,
                 'partition_style': 'random', # vs 'fixed'
@@ -407,6 +412,33 @@ class NaiveDual():
 
         min_val = c1 @ argmin + c2 @ torch.relu(argmin)
         return min_val, argmin
+
+    #--------------------------2D PARTITION STUFF -----------------------------
+
+    def _default_2d_kwargs(self):
+        return {'groups': []
+               }
+
+
+    def zono_2d_zi(self, idx: int):
+        assert idx % 2 == 1
+        bounds = self.preact_bounds[idx]
+        if idx == len(self.network):
+            obj = self.lambda_[idx - 1] + 1
+            return bounds.solve_lp(obj, True)[0]
+
+
+
+        # Partition generation
+        if self.two_d_kwargs is None:
+            self.two_d_kwargs = self._default_partition_kwargs()
+        kwargs = self.partition_kwargs
+
+
+        assert isinstance(bounds, Zonotope)
+        return bounds.solve_relu_mip(self.lambda_[idx - 1], -self.lambda_[idx],
+                                                   apx_params=apx_params)
+
 
 
     # ------------------------- Approximate MIP ------------------------------
@@ -487,6 +519,9 @@ class NaiveDual():
 
 
         return bounds(yvals)
+
+
+
 
     # ------------------------- Exact MIP SOLUTION ---------------------------
 
