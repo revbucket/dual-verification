@@ -99,7 +99,7 @@ class FFNet(nn.Module):
     # =           Evaluation/Forward pass stuff                          =
     # ====================================================================
 
-    def forward(self, x):
+    def forward(self, x, pfx=None):
         shapes = []
         for layer in self.net:
             if isinstance(layer, nn.Linear):
@@ -112,6 +112,9 @@ class FFNet(nn.Module):
         if len(shapes) > 0:
             self.shapes = shapes
         return x
+
+    def _reshape(self, x):
+        return x.view(-1, *self.net[0].input_shape)
 
 
     def pfx_forward(self, x, k):
@@ -189,7 +192,7 @@ class KWBounds(PreactBounds):
 
         input_shape = self.network[0].input_shape
 
-        domain = torch.stack([self.input_range.lbs.view(input_shape), self.input_range.ubs.view(input_shape)], dim=1)
+        domain = torch.stack([self.input_range.lbs.view(input_shape), self.input_range.ubs.view(input_shape)], dim=-1)
         kw_net = SaddleLP([lay for lay in self.network])
 
         kw_net.define_linear_approximation(domain, force_optim=False, no_conv=False)
@@ -210,9 +213,12 @@ class KWBounds(PreactBounds):
                                        intermediate_ubs[running_idx]))
                 running_idx += 1
 
+        bounds.append(Hyperbox(intermediate_lbs[-1], intermediate_ubs[-1]))
+
 
         self.bounds = bounds
         self.computed = True
+        return self
 
 
 class CROWN(PreactBounds):

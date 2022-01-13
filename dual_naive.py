@@ -48,13 +48,13 @@ from typing import List
 
 from neural_nets import FFNet, PreactBounds
 from abstract_domains import Hyperbox, Zonotope
+from partitions import PartitionGroup
 from collections import defaultdict, OrderedDict
 
 class NaiveDual():
 
     def __init__(self, network, input_domain, preact_domain=Hyperbox,
-                 prespec_bounds=None, choice='naive', partition_kwargs=None,
-                 two_d_kwargs=None):
+                 prespec_bounds=None, choice='naive', partition=None):
         """
         Main dual object:
         ARGS:
@@ -86,8 +86,7 @@ class NaiveDual():
 
         # Parameters regarding z_i calculation
         self.choice = choice
-        self.partition_kwargs = partition_kwargs
-        self.two_d_kwargs = two_d_kwargs
+        self.partition = partition
 
         # Initialize dual variables
         self.lambda_ = []
@@ -113,7 +112,11 @@ class NaiveDual():
         val = 0.0
         split_vals = {}
         for idx, layer in enumerate(self.network):
-            layer_val = self.lambda_[idx] @ (x[idx + 1] - layer(x[idx]))
+
+            input_shape = layer.input_shape
+            layer_map = lambda x_: layer(x_.view((1,) + input_shape)).flatten()
+            layer_val = self.lambda_[idx] @ (x[idx + 1] - layer_map(x[idx]))
+
             if verbose:
                 print(layer_val)
 
@@ -132,11 +135,13 @@ class NaiveDual():
         output = OrderedDict()
         for idx, layer in enumerate(self.network):
             varname = '%s:%d' % ('x' if (idx % 2 == 0) else 'z', idx // 2)
+            input_shape = layer.input_shape
+            layer_map = lambda x_: layer(x_.view((1,) + input_shape)).flatten()
             if idx == 0:
-                output[varname] = -self.lambda_[idx] @ layer(x[idx])
+                output[varname] = -self.lambda_[idx] @ layer_map(x[idx])
             else:
                 output[varname] = (self.lambda_[idx - 1] @ x[idx] -
-                                   self.lambda_[idx] @ layer(x[idx]))
+                                   self.lambda_[idx] @ layer_map(x[idx]))
 
         output['output'] = (1 + self.lambda_[-1]) * x[-1][0]
         output['total'] = sum(output.values())
@@ -209,9 +214,22 @@ class NaiveDual():
         return [_.data for _ in argmin]
 
 
+    def make_optimizer(self, num_steps, start_lr=1e-2, end_lr=1e-4):
+        """ Makes a dict with like {optim_obj: Adam object,
+                                    lr_step: LR scheduler that steps linearly}
+        """
+
+        optim_obj = optim.Adam(self.parameters(), lr=start_lr)
+        step_size = (start_lr - end_lr) / num_steps
+        lr_lambda = lambda epoch: start_lr - epoch * step_size
+        lr_step = optim.lr_scheduler.ConstantLR(optim_obj, lr_lambda)
+        return {'optim_obj': optim_obj,
+                'lr_step': lr_step}
+
+
 
     def dual_ascent(self, num_steps: int, optim_obj=None, verbose=False,
-                    logger=None):
+                    logger=None, lr_step=None):
         """ Runs the dual ascent process
         ARGS:
             num_steps: number of gradient steps to perform
@@ -232,7 +250,8 @@ class NaiveDual():
             l_val = -self.lagrangian(self.argmin()) # negate to ASCEND
             l_val.backward()
             optim_obj.step()
-
+            if lr_step is not None:
+                lr_step.step()
             if verbose and (step % verbose) == 0:
                 print("Iter %02d | Certificate: %.02f" % (step, -l_val))
 
@@ -254,7 +273,22 @@ class NaiveDual():
         RETURNS (min_val, argmin)
         """
         assert idx % 2 == 0 # Generally...
-        base_obj = (-self.lambda_[idx].T @ self.network[idx].weight).squeeze()
+
+        # Handle conv vs linear layers
+
+        if isinstance(self.network[idx], nn.Linear):
+            base_obj = (-self.lambda_[idx].T @ self.network[idx].weight).squeeze()
+        elif isinstance(self.network[idx], nn.Conv2d):
+            conv = self.network[idx]
+            output_shape = utils.conv_output_shape(conv)
+            lambda_ = -self.lambda_[idx].view((1,) + output_shape)
+
+            base_obj = F.conv_transpose2d(lambda_, conv.weight, None, conv.stride,
+                                          conv.padding, 0, conv.groups, conv.dilation)
+            base_obj = torch.flatten(base_obj)
+        else:
+            raise NotImplementedError()
+
         if idx > 0:
             base_obj += self.lambda_[idx - 1]
         return self.preact_bounds[idx].solve_lp(base_obj, True)
@@ -265,49 +299,6 @@ class NaiveDual():
     # ===========================================================
 
     # --------------------------- Naive Z_i ----------------------------
-    def naive_argmin_zi(self, idx: int):
-        """ Vectorized version with proper prisming for zonotopes
-            RETURNS: (min, argmin)
-        """
-        assert idx % 2 == 1
-        bounds = self.preact_bounds[idx]
-        if idx == len(self.network):
-            obj = self.lambda_[idx - 1] + 1
-            return bounds.solve_lp(obj, get_argmin=True)
-        lbs, ubs = bounds.lbs, bounds.ubs
-
-
-        # First handle the stable neurons
-        stable_obj = torch.zeros_like(lbs)
-        on_neurons = (lbs >= 0)
-        off_neurons = (ubs < 0)
-        stable_obj[on_neurons] = (self.lambda_[idx - 1][on_neurons] -
-                                  self.lambda_[idx][on_neurons])
-        stable_obj[off_neurons] = self.lambda_[idx - 1][off_neurons]
-
-        argmin = bounds.solve_lp(stable_obj, get_argmin=True)[1]
-        #### And then loop to be done
-
-        rad = bounds.rad
-        for coord in  (~(on_neurons + off_neurons)).nonzero().squeeze():
-            if lbs[coord] > 0:
-                obj = self.lambda_[idx - 1][coord] - self.lambda_[idx][coord]
-                argmin[coord] -= torch.sign(obj) * rad[coord]
-            elif ubs[coord] < 0:
-                obj = self.lambda_[idx - 1][coord]
-                argmin[coord] -= torch.sign(obj) * rad[coord]
-            else:
-                eval_at_l = self.lambda_[idx - 1][coord] * lbs[coord]
-                eval_at_u = (self.lambda_[idx - 1][coord] - self.lambda_[idx][coord]) * ubs[coord]
-
-                argmin[coord] = min([(eval_at_l, lbs[coord]),
-                                     (eval_at_u, ubs[coord]),
-                                     (0.0, 0.0)], key=lambda p: p[0])[1]
-
-        min_val = self.lambda_[idx -1] @ argmin - self.lambda_[idx] @ torch.relu(argmin)
-        return min_val, argmin
-
-
     def naive_argmin_zi_noloop(self, idx: int):
         assert idx % 2 == 1
         bounds = self.preact_bounds[idx]
@@ -347,21 +338,16 @@ class NaiveDual():
 
 
     #--------------------------PARTITION STUFF ----------------------------------
-
     def _default_partition_kwargs(self):
-        return {'num_partitions': 10,
-                'partition_style': 'random', # vs 'fixed'
-                'partitions': None, # subzonos stored here
-               }
+        base_zonotopes = {i: self.preact_bounds[i] for i, bound in enumerate(self.preact_bounds)
+                                                   if i not in self.network.linear_idxs}
+        return PartitionGroup(base_zonotopes, style='fixed_dim', partition_rule='random',
+                              save_partitions=True, save_models=True, partition_dim=2)
 
-    def shrink_partitions(self, num_groups):
-        if self.partition_kwargs.get('partitions') is None:
-            return
-        for k in self.partition_kwargs['partitions']:
-            new_part = Zonotope.merge_partitions(self.partition_kwargs['partitions'][k], num_groups)
-            self.partition_kwargs['partitions'][k] = new_part
-        self.partition_kwargs['num_partitions'] = num_groups
 
+
+    def merge_partitions(self, partition_dim=None, num_partitions=None):
+        self.partition.merge_partitions(partition_dim=partition_dim, num_partitions=num_partitions)
 
     def partition_zi(self, idx: int):
         assert idx % 2 == 1
@@ -375,70 +361,17 @@ class NaiveDual():
         dim = lbs.numel()
 
         # Partition generation
-        if self.partition_kwargs is None:
-            self.partition_kwargs = self._default_partition_kwargs()
-        kwargs = self.partition_kwargs
 
-        # Random partition
+        if self.partition is None:
+            self.partition = self._default_partition_kwargs()
+        elif self.partition.base_zonotopes is None:
+            base_zonotopes = {i: self.preact_bounds[i] for i, bound in enumerate(self.preact_bounds)
+                                                   if i not in self.network.linear_idxs}
+            self.partition.attach_zonotopes(base_zonotopes)
 
-        num_parts = kwargs.get('num_partitions', None)
-        if num_parts is None:
-            part_dim = kwargs.get('partition_dim')
-            num_parts = dim // part_dim
-
-        if kwargs['partition_style'] == 'random':
-            partitions = bounds.make_random_partitions(num_parts)
-        else:
-            if kwargs.get('partitions', None) is None:
-                kwargs['partitions'] = {}
-            if kwargs['partitions'].get(idx, None) is None:
-                kwargs['partitions'][idx] = bounds.make_random_partitions(num_parts)
-            partitions = kwargs['partitions'][idx]
-
-        # Partition optimization
         c1 = self.lambda_[idx - 1]
         c2 = -self.lambda_[idx]
-        if kwargs.get('preproc', None) is None: # preprocess each partition
-            preproc = lambda x: x
-        outputs = []
-        for group, subzono in partitions:
-            subzono = preproc(subzono)
-            outputs.append(subzono.solve_relu_mip(c1[group], c2[group]))
-
-        # Process output
-        argmin = torch.zeros_like(bounds.lbs)
-        for (group, subzono), output in zip(partitions, outputs):
-            argmin[group] = torch.tensor(output[1], dtype=argmin.dtype)
-
-        min_val = c1 @ argmin + c2 @ torch.relu(argmin)
-        return min_val, argmin
-
-    #--------------------------2D PARTITION STUFF -----------------------------
-
-    def _default_2d_kwargs(self):
-        return {'groups': []
-               }
-
-
-    def zono_2d_zi(self, idx: int):
-        assert idx % 2 == 1
-        bounds = self.preact_bounds[idx]
-        if idx == len(self.network):
-            obj = self.lambda_[idx - 1] + 1
-            return bounds.solve_lp(obj, True)[0]
-
-
-
-        # Partition generation
-        if self.two_d_kwargs is None:
-            self.two_d_kwargs = self._default_partition_kwargs()
-        kwargs = self.partition_kwargs
-
-
-        assert isinstance(bounds, Zonotope)
-        return bounds.solve_relu_mip(self.lambda_[idx - 1], -self.lambda_[idx],
-                                                   apx_params=apx_params)
-
+        return self.partition.relu_program(idx, c1, c2)
 
 
     # ------------------------- Approximate MIP ------------------------------

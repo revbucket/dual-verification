@@ -2,6 +2,7 @@
 import torch
 import matplotlib.pyplot as plt
 import random
+import math
 # =========================================================
 # =           Constructors and abstract classes           =
 # =========================================================
@@ -29,6 +30,12 @@ def no_grad(f):
 # =           Other helpful methods                      =
 # ========================================================
 
+def tensorfy(x):
+    if isinstance(x, torch.Tensor):
+        return x
+    else:
+        return torch.Tensor(x)
+
 def conv_indexer(input_shape):
     """ Makes dicts that map from:
             (C,H,W) -> index list
@@ -47,6 +54,14 @@ def conv_indexer(input_shape):
                 i +=1
     tup_to_idx = {v: k for k, v in idx_to_tup.items()}
     return tup_to_idx, idx_to_tup
+
+def conv_output_shape(conv, input_shape=None):
+    if input_shape is None:
+        input_shape = conv.input_shape
+    c, h, w = input_shape
+    out_h = math.floor((h + 2 * conv.padding[0] - conv.dilation[0] * (conv.kernel_size[0] - 1) -1) / conv.stride[0] + 1)
+    out_w = math.floor((w + 2 * conv.padding[1] - conv.dilation[1] * (conv.kernel_size[1] - 1) -1) / conv.stride[1] + 1)
+    return (conv.out_channels, out_h, out_w)
 
 
 def flatten(lol):

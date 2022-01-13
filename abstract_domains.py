@@ -553,18 +553,15 @@ class Zonotope(AbstractDomain):
         return Zonotope(new_center, new_generator, max_order=self.max_order)
 
     def map_conv(self, conv):
-        new_center = conv(self.center.view(-1, *conv.input_shape))
 
-        copy_layer = copy.copy(conv)
-        copy_layer.weight.data = copy_layer.weight.abs().data
-        copy_layer.bias = None
+        input_shape = conv.input_shape
+        new_center = conv(self.center.view(-1, *input_shape)).view(-1)
+        generator = self.generator.T.view((self.gensize,) + input_shape)
+        new_generator = F.conv2d(generator, weight=conv.weight, bias=None, stride=conv.stride,
+                                 padding=conv.padding, dilation=conv.dilation, groups=conv.groups)
 
-        new_generator = conv._conv_forward(self.generator.view(-1, *conv.input_shape),
-                                           conv.weight.abs(), None)
-
-        num_gens = self.generator.shape[1]
-        return Zonotope(torch.flatten(new_center),
-                        new_generator.view(-1, num_gens), max_order=self.max_order)
+        new_generator = new_generator.view(self.gensize, -1).T
+        return Zonotope(new_center, new_generator, max_order=self.max_order)
 
 
     def map_relu(self):
@@ -786,11 +783,12 @@ class Zonotope(AbstractDomain):
         neg_vs = 2 * self.center.view(1, -1) - pos_vs
         return torch.cat([pos_vs, neg_vs])
 
-    def relu_program_2d(self, c1, c2):
+    def relu_program_2d(self, c1, c2, vs=None):
         """ Returns (min_val, argmin) for 2d relu program
         NOTE: does not consider axes vals!
         """
-        vs = self.enumerate_vertices_2d()
+
+        vs = vs if (vs is not None) else self.enumerate_vertices_2d()
         vals = vs @ c1 + torch.relu(vs) @ c2
         min_val, argmin_idx = torch.min(vals, dim=0)
         return min_val, vs[argmin_idx]
@@ -840,16 +838,19 @@ class Zonotope(AbstractDomain):
         return torch.stack([torch.cat([pos_vx, neg_vx], dim=1),
                             torch.cat([pos_vy, neg_vy], dim=1)], dim=1)
 
-    def batch_2d_relu_program(self, c1, c2, groups=None):
+    def batch_2d_relu_program(self, c1, c2, groups=None, group_vs=None):
         """ Solves relu program by partition into groups of 2d
             e.g. min c1*z + c2*relu(z)
         ARGS:
             c1,c2: tensor for objective vector
             groups: groups arg to be fed into batch_2d_partition
+            group_vs: if not None is like the output of batch_2d_partition
         RETURNS:
             min_val, argmin
         """
-        group_vs = self.batch_2d_partition(groups=groups)
+        if group_vs is None:
+            group_vs = self.batch_2d_partition(groups=groups)
+
         obj_vals = (c1[groups].unsqueeze(-1) * group_vs +
                     c2[groups].unsqueeze(-1) * torch.relu(group_vs))
         mins, min_idxs = obj_vals.sum(dim=1).min(dim=1)

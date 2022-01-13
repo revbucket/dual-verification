@@ -147,7 +147,11 @@ class LPRelax():
                 for out_col in range(output_shape[2]):
                     # For every output pixel
                     out_var = output_vars[out_c][out_row][out_col] # Variable we're setting
-                    lin_expr = layer.bias[out_c].item() # Start with the bias
+                    if layer.bias is not None:
+                        lin_expr = layer.bias[out_c].item() # Start with the bias
+                    else:
+                        lin_expr = 0.0
+
 
                     for in_c in range(input_shape[0]): # Looping over input channels
                         for ker_row in range(weight.shape[2]): # Looping over kernel rows

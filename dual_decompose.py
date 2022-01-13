@@ -34,11 +34,12 @@ from typing import List
 from collections import OrderedDict
 from neural_nets import FFNet, PreactBounds
 from abstract_domains import Hyperbox, Zonotope
+from partitions import PartitionGroup
 
 
 class DecompDual:
     def __init__(self, network, input_domain, preact_domain=Hyperbox,
-                 prespec_bounds=None, choice='naive', partition_kwargs=None,
+                 prespec_bounds=None, choice='naive', partition=None,
                  zero_dual=False):
         self.network = network
         self.input_domain = input_domain
@@ -54,7 +55,7 @@ class DecompDual:
 
         # Parameters regarding z_i calculation
         self.choice = choice
-        self.partition_kwargs = partition_kwargs
+        self.partition = partition
 
         # Initialize dual variables
         if not zero_dual:
@@ -73,6 +74,7 @@ class DecompDual:
 
     def initialize_duals(self):
         """ Dual initialization scheme from KW2017"""
+        ### NOTE: Doesn't work with conv!
         lambdas = []
         bounds = self.preact_bounds.bounds
 
@@ -216,97 +218,45 @@ class DecompDual:
         """
 
         lambdas = self.lambda_ if (lambdas is None) else lambdas
+        # Need to handle
+
+
         if idx == 1:
             # Special case
             # Min lambda_2 @ A2 (Relu(Z_1A))
             # over the set Z1A in A1(X)
             lin_coeff = torch.zeros_like(self.preact_bounds[idx].lbs)
-            relu_coeff = self.network[idx + 1].weight.T @ lambdas[idx + 2]
+            if isinstance(self.network[idx + 1], nn.Linear):
+                relu_coeff = self.network[idx + 1].weight.T @ lambdas[idx + 2]
+            else:
+                conv = self.network[idx + 1]
+                output_shape = utils.conv_output_shape(conv)
+                relu_coeff = F.conv_transpose2d(lambdas[idx + 2].view((1,) + output_shape),
+                                                conv.weight, None, conv.stride, conv.padding, 0,
+                                                conv.groups, conv.dilation).flatten()
 
         elif idx < len(self.network) - 2:
             lin_coeff = -lambdas[idx]
-            relu_coeff = (self.network[idx + 1].weight.T @ lambdas[idx + 2])
+
+            if isinstance(self.network[idx + 1], nn.Linear):
+                relu_coeff = (self.network[idx + 1].weight.T @ lambdas[idx + 2])
+            else:
+                conv = self.network[idx + 1]
+                output_shape = utils.conv_output_shape(conv)
+                relu_coeff = F.conv_transpose2d(lambdas[idx + 2].view((1,) + output_shape),
+                                                conv.weight, None, conv.stride, conv.padding, 0,
+                                                conv.groups, conv.dilation).flatten()
         else:
             lin_coeff = -lambdas[idx]
             relu_coeff = self.network[idx + 1].weight.T.squeeze()
         return lin_coeff, relu_coeff
 
 
-    def argmin_pi(self, idx: int, lambdas=None):
-        """ Gets the argmin for the i^th p_i loop.
-            This is indexed where the ReLU's are.
-        """
-        assert isinstance(self.network[idx], nn.ReLU)
-        bounds = self.preact_bounds[idx]
-        lbs, ubs = bounds.lbs, bounds.ubs
+    # =====================================================================
+    # =           Argmin for Z_i: Many choices here                       =
+    # =====================================================================
 
-        # Define the objectives to solve over
-        # In general we have
-        # Min_Z   c1 @ z + c2 @ relu(z)
-        lin_coeff, relu_coeff = self._get_coeffs(idx, lambdas=lambdas)
-
-
-        argmin = torch.clone(bounds.center)
-        rad = bounds.rad
-        for coord in range(len(lbs)):
-            if lbs[coord] > 0: # relu always on
-                obj = lin_coeff[coord] + relu_coeff[coord]
-                argmin[coord] -= (torch.sign(obj) * rad[coord]).item()
-            elif ubs[coord] < 0:  # relu always off
-                obj = lin_coeff[coord]
-                argmin[coord] -= (torch.sign(obj) * rad[coord]).item()
-            else:
-                eval_at_l = lin_coeff[coord] * lbs[coord]
-                eval_at_u = (lin_coeff[coord] + relu_coeff[coord]) * ubs[coord]
-                argmin[coord] = min([(eval_at_l, lbs[coord]),
-                                     (eval_at_u, ubs[coord]),
-                                     (0.0, 0.0)], key=lambda p: p[0])[1]
-
-        return (argmin.data, self.network[idx + 1](F.relu(argmin)).data)
-
-    def argmin_pi_zono(self, idx: int, lambdas=None):
-
-        bounds = self.preact_bounds[idx]
-        if not isinstance(bounds, Zonotope):
-            return self.argmin_pi(idx, lambdas=lambdas)
-
-        assert isinstance(self.network[idx], nn.ReLU)
-        lbs, ubs = bounds.lbs, bounds.ubs
-        ## LAYERWISE STUFF HERE: Compute the objective vector
-        lin_coeff, relu_coeff = self._get_coeffs(idx, lambdas=lambdas)
-
-        ## Now do the more clever zonotope thing
-        #  We separate into fixed-relu and non-fixed settings
-        #  In the fixed case, we create a projected zonotope and
-        #  solve the optimization for those coordinates
-
-        fixed_idxs = ((lbs * ubs) >= 0).nonzero().squeeze()
-        off_subidxs = (ubs <= 0)[fixed_idxs].nonzero().squeeze()
-        fixed_lin = lin_coeff[fixed_idxs]
-        fixed_relu = torch.clone(relu_coeff[fixed_idxs])
-        fixed_relu[off_subidxs] = 0.
-        fixed_obj = (fixed_lin + fixed_relu).view(-1)
-        expanded_fixed_obj = torch.zeros_like(lbs)
-        expanded_fixed_obj[fixed_idxs] = fixed_obj
-
-        _, fixed_argmin = bounds.solve_lp(expanded_fixed_obj, get_argmin=True)
-
-        ## Now do the coordinate-wise thing for non-fixed neurons
-        non_fixed_idxs = ((lbs * ubs) < 0).nonzero().squeeze()
-        argmin = torch.clone(bounds.center)
-        rad = bounds.rad
-        for coord in non_fixed_idxs:
-            eval_at_l = lin_coeff[coord] * lbs[coord]
-            eval_at_u = (lin_coeff[coord] + relu_coeff[coord]) * ubs[coord]
-            argmin[coord] = min([(eval_at_l, lbs[coord]),
-                                 (eval_at_u, ubs[coord]),
-                                 (0.0, 0.0)], key=lambda p: p[0])[1]
-
-        argmin[fixed_idxs] = fixed_argmin[fixed_idxs]
-
-        return (argmin.data, self.network[idx + 1](F.relu(argmin)).data)
-
-
+    # -------------------------------- Basic/Naive solution ------------------------------
     def argmin_pi_noloop(self, idx: int, lambdas=None):
         bounds = self.preact_bounds[idx]
         assert isinstance(self.network[idx], nn.ReLU)
@@ -338,14 +288,25 @@ class DecompDual:
         return argmin.data, self.network[idx + 1](torch.relu(argmin)).data
 
 
-
+    # -------------------------------PARTITION STUFF ---------------------------
 
     def _default_partition_kwargs(self):
+        base_zonotopes = {i: self.preact_bounds[i] for i, bound in enumerate(self.preact_bounds)
+                               if i not in self.network.linear_idxs}
+        return PartitionGroup(base_zonotopes, style='fixed_dim', partition_rule='random',
+                              save_partitions=True, save_models=True, partition_dim=2)
+
+        #def _default_partition_kwargs(self):
         return {'num_partitions': 10,
                 'partition_style': 'random', # vs 'fixed'
                 'partition_rule': 'random',
                 'partitions': None, # subzonos stored here
                }
+
+
+    def merge_partitions(self, partition_dim=None, num_partitions=None):
+        self.partition.merge_partitions(partition_dim=partition_dim, num_partitions=num_partitions)
+
 
     def shrink_partitions(self, num_groups):
         if self.partition_kwargs.get('partitions') is None:
@@ -391,12 +352,27 @@ class DecompDual:
             raise NotImplementedError()
 
 
-
-
     def argmin_pi_partition(self, idx: int, lambdas=None):
+        # Basic stuff:
         bounds = self.preact_bounds[idx]
+        if isinstance(bounds, Hyperbox):
+            return self.argmin_pi_noloop(idx, lambdas=lambdas)
         lbs, ubs = bounds.lbs, bounds.ubs
         c1, c2 = self._get_coeffs(idx, lambdas=lambdas)
+
+        # Partition generation
+        if self.partition is None:
+            self.partition = self._default_partition_kwargs()
+        elif self.partition.base_zonotopes is None:
+            base_zonotopes = {i: self.preact_bounds[i] for i, bound in enumerate(self.preact_bounds)
+                              if not i in self.network.linear_idxs}
+            self.partition.attach_zonotopes(base_zonotopes)
+
+        argmin = self.partition.relu_program(idx, c1, c2)[1]
+        return (argmin.data , self.network[idx + 1](F.relu(argmin)).data)
+
+        #def argmin_pi_partition(self, idx: int, lambdas=None):
+
 
 
         # Partition generation
