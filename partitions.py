@@ -12,7 +12,8 @@ class PartitionGroup():
 	def __init__(self, base_zonotopes, style='fixed_dim',
 				 partition_rule='random', save_partitions=True,
 				 save_models=True, num_partitions=None, partition_dim=None,
-				 max_order=None, force_mip=False, cache_vertices=True):
+				 max_order=None, force_mip=False, cache_vertices=True,
+				 use_crossings=True):
 		""" Parameters for partitioning.
 		Two basic styles for partitioning:
 			- fixed number of partitions per zonotope  (fixed_part)
@@ -30,6 +31,7 @@ class PartitionGroup():
 			max_order: if not None, we use 'axalign' to reduce order of zonotopes
 			force_mip: if True, we use MIP even in partitions of dimension 2
 			cache_vertices: if True, and 2d, we save the vertices
+			use_crossings: if True, we consider the coordinate-axes crossing objects in 2d zonos
 		"""
 		# Assertion checks
 		assert style in ['fixed_dim', 'fixed_part']
@@ -50,6 +52,7 @@ class PartitionGroup():
 		self.max_order = max_order
 		self.force_mip = force_mip
 		self.cache_vertices = cache_vertices
+		self.use_crossings = use_crossings
 		self.vertices = {}
 
 		if self.base_zonotopes is not None:
@@ -133,24 +136,35 @@ class PartitionGroup():
 		else:
 			groups = self.groups[i]
 
-		groups = utils.tensorfy(groups).long()
+
 		# Now handle the twoD case if we can
 		if not self.force_mip and all(len(_) == 2 for _ in groups):
 			# group_vs = zono.batch_2d_partition(groups=groups)
 			# return zono.batch_2d_relu_program(c1, c2, groups=torch.tensor(groups))#, group_vs=group_vs)
+			groups = utils.tensorfy(groups).long()
 			if not self.cache_vertices:
-				return zono.batch_2d_relu_program(c1, c2, groups=groups)
+				if self.use_crossings:
+					return zono.loop_zono_rp(c1, c2, groups=groups) # uses crossings by default
+				else:
+					return zono.batch_2d_relu_program(c1, c2, groups=groups)
 			else:
 				if self.vertices.get(i) is None:
-					self.vertices[i] = zono.batch_2d_partition(groups=groups)
+					if self.use_crossings:
+						self.vertices[i] = zono.loop_batch_zono_vs(groups=groups)
+					else:
+						self.vertices[i] = zono.batch_2d_partition(groups=groups)
+				#if self.use_crossings:
+				#	return zono.loop_zono_rp(c1, c2, groups=groups, loop_outs=self.vertices[i])
+				#else:
 				return zono.batch_2d_relu_program(c1, c2, groups=groups,
-												  group_vs=self.vertices[i])
+													  group_vs=self.vertices[i])
 
 
 		# Otherwise make the partitions
 		if self.subzonos.get(i) is not None:
 			parts = self.subzonos[i]
 		else:
+
 			parts = self.order_sweep([_[1] for _ in self.base_zonotopes[i].partition(groups)])
 
 		obj_val = 0.0
@@ -198,3 +212,56 @@ class PartitionGroup():
 					self.subzonos[i] = subzonos
 
 		return new_groups
+
+
+	def relu_program_simplex(self, i, c1, c2):
+		zono = self.base_zonotopes[i]
+		if self.groups.get(i) is None:
+			groups = self.make_ith_partition(i, **kwargs)
+		else:
+			groups = self.groups[i]
+
+		# Otherwise make the partitions
+		if self.subzonos.get(i) is not None:
+			parts = self.subzonos[i]
+		else:
+
+			parts = self.order_sweep([_[1] for _ in self.base_zonotopes[i].partition(groups)])
+
+		obj_val = 0.0
+		argmin = torch.zeros_like(zono.center)
+		for group, subzono in zip(groups, parts):
+
+			min_val, argmin_ys = subzono.solve_relu_simplex(c1[group], c2[group])
+
+			obj_val += min_val
+			argmin[group] = subzono(argmin_ys)#torch.tensor(sub_argmin) # DTYPES HERE?
+
+		return obj_val, argmin
+
+
+	def relu_program_lbfgsb(self, i, c1, c2):
+		zono = self.base_zonotopes[i]
+		if self.groups.get(i) is None:
+			groups = self.make_ith_partition(i, **kwargs)
+		else:
+			groups = self.groups[i]
+
+		# Otherwise make the partitions
+		if self.subzonos.get(i) is not None:
+			parts = self.subzonos[i]
+		else:
+
+			parts = self.order_sweep([_[1] for _ in self.base_zonotopes[i].partition(groups)])
+
+		obj_val = 0.0
+		argmin = torch.zeros_like(zono.center)
+		for group, subzono in zip(groups, parts):
+
+			min_val, argmin_ys = subzono.solve_relu_lbfgsb(c1[group], c2[group])
+
+			obj_val += min_val
+			argmin[group] = subzono(argmin_ys)#torch.tensor(sub_argmin) # DTYPES HERE?
+
+		return obj_val, argmin
+

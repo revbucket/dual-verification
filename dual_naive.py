@@ -204,8 +204,12 @@ class NaiveDual():
                     argmin.append(torch.tensor(self.fw_zi(i)[1]))
                 elif self.choice == 'simplex':
                     argmin.append(self.simplex_zi(i))
+                elif self.choice == 'partition_simplex':
+                    argmin.append(self.simplex_zi_partition(i)[1])
                 elif self.choice == 'lbfgsb':
                     argmin.append(self.lbfgsb_zi(i))
+                elif self.choice == 'lbfgsb_partition':
+                    argmin.append(self.lbfgsb_zi_partition(i)[1])
                 elif self.choice == '2d_zono':
                     argmin.append(self.zono_2d_zi(i)[1])
                 else:
@@ -371,7 +375,9 @@ class NaiveDual():
 
         c1 = self.lambda_[idx - 1]
         c2 = -self.lambda_[idx]
+
         return self.partition.relu_program(idx, c1, c2)
+
 
 
     # ------------------------- Approximate MIP ------------------------------
@@ -438,6 +444,31 @@ class NaiveDual():
 
         return bounds(yvals)
 
+    # Partition shot (use partitions AND use simplex for the iterations)
+    def simplex_zi_partition(self, idx: int):
+
+        # Basic stuff
+        bounds = self.preact_bounds[idx]
+        if idx == len(self.network): # final one is easy: no relu here
+            obj = self.lambda_[idx - 1] + 1
+            return bounds.solve_lp(obj, True)
+        lbs, ubs = bounds.lbs, bounds.ubs
+        dim = lbs.numel()
+
+        # Partition generation
+
+        if self.partition is None:
+            self.partition = self._default_partition_kwargs()
+        elif self.partition.base_zonotopes is None:
+            base_zonotopes = {i: self.preact_bounds[i] for i, bound in enumerate(self.preact_bounds)
+                                                   if i not in self.network.linear_idxs}
+            self.partition.attach_zonotopes(base_zonotopes)
+
+        c1 = self.lambda_[idx - 1]
+        c2 = -self.lambda_[idx]
+
+        return self.partition.relu_program_simplex(idx, c1, c2)
+
     # ------------------------------- L-BFGS-B -------------------------------
 
     def lbfgsb_zi(self, idx: int):
@@ -453,6 +484,30 @@ class NaiveDual():
 
         return bounds(yvals)
 
+
+    def lbfgsb_zi_partition(self, idx: int):
+
+        # Basic stuff
+        bounds = self.preact_bounds[idx]
+        if idx == len(self.network): # final one is easy: no relu here
+            obj = self.lambda_[idx - 1] + 1
+            return bounds.solve_lp(obj, True)
+        lbs, ubs = bounds.lbs, bounds.ubs
+        dim = lbs.numel()
+
+        # Partition generation
+
+        if self.partition is None:
+            self.partition = self._default_partition_kwargs()
+        elif self.partition.base_zonotopes is None:
+            base_zonotopes = {i: self.preact_bounds[i] for i, bound in enumerate(self.preact_bounds)
+                                                   if i not in self.network.linear_idxs}
+            self.partition.attach_zonotopes(base_zonotopes)
+
+        c1 = self.lambda_[idx - 1]
+        c2 = -self.lambda_[idx]
+
+        return self.partition.relu_program_lbfgsb(idx, c1, c2)
 
 
 

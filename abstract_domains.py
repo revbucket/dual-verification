@@ -507,7 +507,8 @@ class Zonotope(AbstractDomain):
         ARGS:
             - groups is a list of index-lists. Final one may be omitted/inferred
         """
-        groups = utils.complete_partition(groups, self.lbs.numel())
+
+        #groups = utils.complete_partition(groups, self.lbs.numel())
 
         out_zonos = []
         for group in groups:
@@ -740,7 +741,7 @@ class Zonotope(AbstractDomain):
         yvals = torch.tensor([_.x for _ in ys])
 
         if apx_params is not None:
-            return model.ObjBound, model
+            return model.ObjBound, xvals, yvals, model
         obj = model.objVal
 
         return obj, xvals, yvals, model
@@ -769,26 +770,67 @@ class Zonotope(AbstractDomain):
     # =           2 Dimensional Partition blocks            =
     # =======================================================
 
-    def enumerate_vertices_2d(self):
+    def enumerate_vertices_2d(self, collect_crossings=True):
         # Returns (2*gensize, 2) tensor of vertices for this zono
         assert self.dim == 2
-        left_point = self(-torch.sign(self.generator[0]))
+        signs = -torch.sign(self.generator[0])
+        signs[signs == 0] = 1.0
+        left_point = self(signs)
         # Sort and orient the slopes
         slopes = self.generator[1] / self.generator[0]
         sorted_idxs = torch.sort(slopes)[1]
-        orient_gen = self.generator * torch.sign(self.generator[0]).view(1,-1)
+        orient_gen = self.generator * -signs.view(1,-1)
         shuffle_gen = orient_gen[:, sorted_idxs]
         cumsum_gen = 2 * shuffle_gen.cumsum(dim=1)
         pos_vs = left_point.view(1, -1) + cumsum_gen.T
         neg_vs = 2 * self.center.view(1, -1) - pos_vs
-        return torch.cat([pos_vs, neg_vs])
+
+        vs = torch.cat([pos_vs, neg_vs])
+        # Collecting coordinate-axes crossing points
+        if collect_crossings is True:
+            crossings = self.all_cross_2d(vs)
+            if crossings is not None:
+                vs = torch.cat([vs, crossings])
+        return vs
+
+    def crossing_vs_2d(self, vs, dim=0):
+        if self.lbs[dim] * self.ubs[dim] > 0:
+            return None
+        num_vs = vs.shape[0]
+        start_idxs = ((vs[1:,dim] * vs[:-1,dim]) < 0).nonzero().flatten()
+        if start_idxs.numel() == 1:
+            start_idxs = torch.cat([start_idxs, -torch.ones_like(start_idxs).long()])
+
+        point_idxs =torch.stack([start_idxs, ((start_idxs + 1) % vs.shape[0])], dim=1)
+        points = vs[point_idxs]
+        starts = points[:,0,:]
+        xs = points[:,:,dim]
+        lens = xs @ torch.tensor([-1.0,1.0])
+        diffs = points[:,1,:] - points[:,0,:]
+        interp_factor = -xs[:,0] / lens
+        offsets = diffs * interp_factor.view(-1, 1)
+        mids = starts + offsets
+        return mids
+
+    def all_cross_2d(self, vs):
+        output = []
+        output.append(self.crossing_vs_2d(vs, dim=0))
+        output.append(self.crossing_vs_2d(vs, dim=1))
+        # And maybe add origin in there...
+
+        if output[0] is not None and torch.prod(output[0][:,1]) < 0:
+            output.append(torch.zeros_like(self.center).view(1, -1))
+        noneless_output = [_ for _ in output if _ is not None]
+        if len(noneless_output) > 0:
+            return torch.cat(noneless_output)
+        return None
+
 
     def relu_program_2d(self, c1, c2, vs=None):
         """ Returns (min_val, argmin) for 2d relu program
         NOTE: does not consider axes vals!
         """
-
-        vs = vs if (vs is not None) else self.enumerate_vertices_2d()
+        vs = vs if (vs is not None) else self.enumerate_vertices_2d(collect_crossings=True)
         vals = vs @ c1 + torch.relu(vs) @ c2
         min_val, argmin_idx = torch.min(vals, dim=0)
         return min_val, vs[argmin_idx]
@@ -809,6 +851,7 @@ class Zonotope(AbstractDomain):
         center, generator = self.center, self.generator
 
         signs = torch.sign(generator[xs,:])
+        signs[signs == 0] = 1 # arbitrary resolve zeros
         sign_gen = torch.ones_like(generator)
         sign_gen[xs,:] = signs
         sign_gen[ys,:] = signs
@@ -859,6 +902,63 @@ class Zonotope(AbstractDomain):
         argmin[groups[:,0]] = torch.gather(group_vs[:,0,:], 1, min_idxs.view(-1, 1)).squeeze()
         argmin[groups[:,1]] = torch.gather(group_vs[:,1,:], 1, min_idxs.view(-1, 1)).squeeze()
         return mins.sum(), argmin
+
+
+    # LOOP methods (not as fast, but has crossings)
+    def loop_batch_zono_vs(self, groups=None):
+        # Set up groups
+        outputs = []
+        if groups is None:
+            groups = torch.rand(self.dim).sort()[1].view(-1, 2)
+        for group in groups:
+            subzono = Zonotope(self.center[group], self.generator[group,:])
+            outputs.append(subzono.enumerate_vertices_2d(collect_crossings=True))
+
+
+
+        """ HACK HERE:
+            Because of the crossings, the groups no longer have same
+            number of vertices. Ideally I want to shape them like
+            outputs.shape == (num_groups, 2, #vertices)
+            But #vertices differs so I will just pad with the first
+            few columns (rows here) of each
+        """
+        # padding block
+        max_vs = max([_.shape[0] for _ in outputs])
+        for i, el in enumerate(outputs):
+            num_to_pad = max_vs - el.shape[0]
+            if num_to_pad == 0:
+                continue
+            pad = el[:num_to_pad, :]
+            outputs[i] = torch.cat([el, pad])
+
+
+
+
+        return torch.stack([_.T for _ in outputs], dim=0)
+
+        # return outputs
+
+    def loop_zono_rp(self, c1, c2, groups=None, loop_outs=None):
+
+        def rp_vertices_2d(vs, c1, c2):
+            vals = vs @ c1 + torch.relu(vs) @ c2
+            min_val, argmin_idx = torch.min(vals, dim=0)
+            return min_val, vs[argmin_idx]
+
+        if groups is None:
+            groups = torch.rand(self.dim).sort()[1].view(-1, 2)
+
+        if loop_outs is not None:
+            loop_outs = self.loop_batch_zono_vs(groups=groups)
+
+        argmin = torch.zeros_like(self.center)
+        min_val = 0.0
+        for output, group in zip(loop_outs, groups):
+            sub_min, sub_argmin = rp_vertices_2d(output, c1[group], c2[group])
+            min_val += sub_min
+            argmin[group] = sub_argmin
+        return min_val, argmin
 
 # ========================================================
 # =                      POLYTOPES                       =
