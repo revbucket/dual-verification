@@ -1,0 +1,337 @@
+""" Dual decompose solved the way Alessandro et al solve it
+"""
+
+
+
+
+import torch
+import torch.nn as nn
+import torch.nn.functional as F
+import torch.optim as optim
+import time
+from typing import List
+from collections import OrderedDict
+from neural_nets import FFNet, PreactBounds
+from abstract_domains import Hyperbox, Zonotope
+import utilities as utils
+from partitions import PartitionGroup
+
+
+class DecompDual2:
+    def __init__(self, network, input_domain, preact_domain=Hyperbox,
+                 choice='naive', partition=None, preact_bounds=None,
+                 zero_dual=True): # TODO: implement KW initial dual bounds
+        self.network = network
+        self.input_domain = input_domain
+
+        self.preact_bounds = (preact_bounds if (preact_bounds is not None) else
+                              PreactBounds(network, input_domain, preact_domain).compute())
+
+        self.choice = choice
+        self.partition = partition
+        # Initialize duals
+        self.rhos = self.init_duals(zero_dual)
+
+    # ==============================================================================
+    # =           Helper methods                                                   =
+    # ==============================================================================
+
+    def init_duals(self, zero_dual):
+        rhos = OrderedDict()
+        for idx, layer in enumerate(self.network):
+            if isinstance(layer, nn.ReLU):
+
+                rhos[idx] = nn.Parameter(torch.zeros_like(self.preact_bounds[idx].lbs))
+        return rhos
+
+    def parameters(self):
+        return iter(self.rhos.values())
+
+
+    def _get_coeffs(self, idx: int, rhos=None):
+        rhos = self.rhos if (rhos is None) else rhos
+
+        # subproblem indices are {0, 1, 3, 5,...,}
+
+        if idx == 0:
+            # Special case
+            # Min -rho[1] * Aff(x_input)
+            lin_coeff = torch.zeros_like(self.preact_bounds[0].lbs)
+            if isinstance(self.network[0], nn.Linear):
+                out_coeff = (rhos[1] @ self.network[0].weight).squeeze()
+            elif isinstance(self.network[0], nn.Conv2d):
+                conv = self.network[0]
+                output_shape = utils.conv_output_shape(conv)
+                out_coeff = F.conv_transpose2d(rhos[1].view((1,) + output_shape),
+                                               conv.weight, None, conv.stride, conv.padding, 0,
+                                               conv.groups, conv.dilation).flatten()
+            else:
+                raise NotImplementedError()
+
+        elif idx < len(self.network) - 2:
+            lin_coeff = -rhos[idx]
+            if isinstance(self.network[idx + 1], nn.Linear):
+                out_coeff = (rhos[idx + 2] @ self.network[idx + 1].weight).squeeze()
+            elif isinstance(self.network[idx + 1], nn.Conv2d):
+                conv = self.network[idx + 1]
+                output_shape = utils.conv_output_shape(conv)
+                out_coeff = F.conv_transpose2d(rhos[idx + 2].view((1,) + output_shape),
+                                               conv.weight, None, conv.stride, conv.padding, 0,
+                                               conv.groups, conv.dilation).flatten()
+
+        else:
+            lin_coeff = -rhos[idx]
+            out_coeff = self.network[idx + 1].weight.squeeze()
+        return lin_coeff, out_coeff
+
+
+    # ===========================================================================
+    # =           Lagrangian compute methods                                    =
+    # ===========================================================================
+
+    def lagrangian(self, primals=None, rhos=None):
+        # Compute lagrangian with argmins here
+        total = {}
+        rhos = self.rhos if (rhos is None) else rhos
+        primals = self.get_primals(rhos=rhos)[1]
+
+        for idx, layer in enumerate(self.network):
+            if not isinstance(layer, nn.ReLU):
+                continue
+            x_a = primals[(idx, 'A')]
+            x_b = primals[(idx, 'B')]
+            total[idx] = rhos[idx] @ (x_a - x_b)
+        # And final value is just the last variable
+        total[len(self.network)] = primals[(len(self.network), 'A')].item()
+
+        return sum(total.values())
+
+
+    def lagrangian_mip_bounds(self, rhos=None, time_limit=None):
+        """ Returns bounds on the dual given the dual vars (rhos)
+        In a dict like:
+            {subproblem_idx: (subproblem_lb, subproblem_Ub, subproblem_time)}
+        """
+        rhos = rhos if (rhos is not None) else self.rhos
+        apx_params = {'MIPFocus': 3}
+        if time_limit is not None:
+            apx_params['TimeLimit'] = time_limit
+
+        total = {}
+        for idx, layer in enumerate(self.network):
+            start_time = time.time()
+            clock = lambda: time.time() - start_time
+            if idx == 0:
+                val = self.get_0th_primal(rhos=rhos)[0]
+                total[idx] = (val, val, clock())
+            elif isinstance(layer, nn.ReLU):
+                model = self.get_ith_primal_mip(idx, rhos, apx_params=apx_params, return_model=True)
+                total[idx] = (model.ObjBound, model.objVal, clock())
+
+        total_lbs = sum(_[0] for _ in total.values()).data.item()
+        total_ubs = sum(_[1] for _ in total.values()).data.item()
+        total_time = sum(_[2] for _ in total.values())
+        total['total'] = (total_lbs, total_ubs, total_time)
+        return total
+
+
+    def get_primals(self, rhos=None):
+        # Returns like (total_val_dict, argmin_dict)
+        argmin = OrderedDict()
+        total_vals = {}
+        for idx, layer in enumerate(self.network):
+            if idx == 0:
+                # Solve linear case here
+                opt_val, primal_in, primal_out = self.get_0th_primal(rhos=rhos)
+                argmin[(1,'A')] = primal_out
+
+            elif isinstance(layer, nn.ReLU):
+                opt_val, x_b, x_a = self.get_ith_primal(idx, rhos=rhos)
+                argmin[(idx, 'B')] = x_b
+                argmin[(idx + 2, 'A')] = x_a
+            else:
+                continue
+            total_vals[idx] = opt_val
+
+        return total_vals, argmin
+
+
+    def get_ith_primal(self, idx, rhos=None):
+        # Outputs here are (opt_val, argmin, next_layer_argmin)
+        rhos = rhos if (rhos is not None) else self.rhos
+
+        if self.choice == 'naive' or isinstance(self.preact_bounds[idx], Hyperbox):
+            return self.get_ith_primal_naive(idx, rhos)
+        elif self.choice == 'partition':
+            return self.get_ith_primal_partition(idx, rhos)
+        elif self.choice == 'simplex':
+            return self.get_ith_primal_simplex(idx, rhos)
+        elif self.choice == 'partition_simplex':
+            return self.get_ith_primal_simplex_partition(idx, rhos)
+        elif self.choice == 'lbfgsb':
+            return self.get_ith_primal_lbfgsb(idx, rhos)
+        elif self.choice == 'lbfgsb_partition':
+            return self.get_ith_primal_lbfgsb_partition(idx, rhos)
+        else:
+            raise NotImplementedError()
+
+
+    def dual_ascent(self, num_steps, optim_obj=None, verbose=True):
+        optim_obj = optim_obj if (optim_obj is not None) else optim.Adam(self.parameters(), lr=1e-3)
+
+        last_time = time.time()
+        for step in range(num_steps):
+            optim_obj.zero_grad()
+            loss_val = -1 * self.lagrangian()
+            loss_val.backward()
+            if verbose and (step % verbose) == 0:
+                print("Iter %02d | Certificate: %.02f  | Time: %.02f" % (step, -loss_val, time.time() - last_time))
+                last_time = time.time()
+            optim_obj.step()
+
+        return self.lagrangian()
+
+
+    # ================================================================================
+    # =                            PRIMAL SOLVERS                                    =
+    # ================================================================================
+    # ALL PRIMAL SOLVERS OUTPUT (value, argmin, armin_next_layer)
+    #------------------------------- 0th layer is always an LP -----------------------------
+
+    def _next_layer_relu_out(self, idx, x):
+        layer = self.network[idx + 1]
+        return layer(x.relu().view(layer.input_shape).unsqueeze(0)).flatten()
+
+    def get_0th_primal(self, rhos):
+        """ Solves min_x -rho[1] @ layers[0](x) over x in input
+            RETURNS: (x, layers[0](x))
+        """
+        _, out_coeff = self._get_coeffs(0, rhos=rhos)
+        bound = self.preact_bounds[0]
+        opt_val, x = bound.solve_lp(out_coeff, get_argmin=True)
+        return opt_val, x, self.network[0](x.view(self.network[0].input_shape).unsqueeze(0)).flatten()
+
+
+    def get_ith_primal_naive(self, idx, rhos):
+        """ Solves min_z rho[idx]@z - rho[idx+2] @ Aff(relu(z))
+            for z in bounds[z]
+            RETURNS (z, layers[idx + 2](relu(z)))
+        """
+        lin_coeff, relu_coeff = self._get_coeffs(idx, rhos=rhos)
+        bound = self.preact_bounds[idx]
+        if isinstance(bound, Hyperbox):
+            opt_val, x = bound.solve_relu_program(lin_coeff, relu_coeff, get_argmin=True)
+        else:
+            # Then partition into stable and unstable cases... and do zonotope
+            stable_obj = torch.zeros_like(bound.lbs)
+            on_coords = (bound.lbs >= 0)
+            off_coords = (bound.ubs < 0)
+            ambig_coords = ~(on_coords + off_coords)
+
+            stable_obj[on_coords] = lin_coeff[on_coords] + relu_coeff[on_coords]
+            stable_obj[off_coords] = lin_coeff[off_coords]
+
+            opt_val_0, argmin = bound.solve_lp(stable_obj, get_argmin=True)
+
+            # Then do the hyperbox for the rest
+            ambig_box = Hyperbox(bound.lbs[ambig_coords], bound.ubs[ambig_coords])
+            opt_val_1, ambig_argmin = ambig_box.solve_relu_program(lin_coeff[ambig_coords],
+                                                                   relu_coeff[ambig_coords],
+                                                                   get_argmin=True)
+            argmin[ambig_coords] = ambig_argmin
+            x = argmin.data
+            opt_val = opt_val_0 + opt_val_1
+
+        return opt_val, x, self._next_layer_relu_out(idx, x)
+
+
+    #---------------------------------- PARTITION STUFF ----------------------------
+
+    def gather_partitions(self):
+        """ Use this method to access partition object.
+            If partition is None, makes a basic partition (2d)
+            If partition doesn't have zonos attached, attaches them
+            otherwise returns PartitionGroup
+        """
+        # Use this method to access partition object.
+        base_zonotopes = {i: self.preact_bounds[i] for i, bound in enumerate(self.preact_bounds)
+                          if i not in self.network.linear_idxs}
+        if self.partition is None:
+            partition = PartitionGroup(base_zonotopes, style='fixed_dim', partition_rule='random',
+                                       save_partitions=True, save_models=False, partition_dim=2,
+                                       use_crossings=True)
+            self.partition = partition
+
+        if self.partition.base_zonotopes is None:
+            self.partition.attach_zonotopes(base_zonotopes)
+        return self.partition
+
+
+    def merge_partitions(self, partition_dim=None, num_partitions=None):
+        self.gather_partitions().merge_partitions(partition_dim=partition_dim,
+                                                  num_partitions=num_partitions)
+        self.partition.save_models = True # Generally want to do this to save time later
+
+
+    def get_ith_primal_partition(self, idx: int, rhos):
+        # Basic stuff:
+        bounds = self.preact_bounds[idx]
+        assert isinstance(bounds, Zonotope)
+        c1, c2 = self._get_coeffs(idx, rhos=rhos)
+
+        opt_val, x = self.gather_partitions().relu_program(idx, c1, c2)
+        return opt_val, x.data, self._next_layer_relu_out(idx, x.data)
+
+
+
+    # -------------------------- SIMPLEX -------------------------------------------
+    def get_ith_primal_simplex(self, idx: int, rhos):
+        bounds = self.preact_bounds[idx]
+        assert isinstance(bounds, Zonotope)
+
+        c1, c2 = self._get_coeffs(idx, rhos=rhos)
+        opt_val, yvals = bounds.solve_relu_simplex(c1, c2)
+        x = bounds(yvals)
+        return opt_val, x.data, self._next_layer_relu_out(x.data)
+
+    def get_ith_primal_simplex_partition(self, idx: int, rhos):
+        bounds = self.preact_bounds[idx]
+        assert isinstance(bounds, Zonotope)
+        c1, c2 = self._get_coeffs(idx, rhos=rhos)
+        opt_val, x = self.gather_partitions().relu_program_simplex(idx, c1, c2)
+        return opt_val, x.data, self._next_layer_relu_out(idx, x.data)
+
+
+    # ------------------------ L-BFGS-B --------------------------------------
+
+    def get_ith_primal_lbfgsb(self, idx: int, rhos):
+        bounds = self.preact_bounds[idx]
+        c1, c2 = self._get_coeffs(idx, rhos=rhos)
+        opt_val, yvals = bounds.solve_relu_lbfgsb(c1, c1)
+        x = bounds(yvals)
+        return opt_val, x.data, self._next_layer_relu_out(idx, x.data)
+
+
+    def get_ith_primal_lbfgsb_partition(self, idx: int, rhos):
+        bounds = self.preact_bounds[idx]
+        assert isinstance(bounds, Zonotope)
+
+        c1, c2 = self._get_coeffs(idx, rhos=rhos)
+        opt_val, x = self.gather_partitions().relu_program_lbfgsb(idx, c1, c2)
+        return opt_val, x.data, self._next_layer_relu_out(idx, x.data)
+
+
+    # ---------------------- Other MIP-y methods -------------------------------------
+    def get_ith_primal_mip(self, idx: int, rhos, apx_params=None, return_model=False):
+        bounds = self.preact_bounds[idx]
+        assert isinstance(bounds, Zonotope)
+        c1, c2 = self._get_coeffs(idx, rhos=rhos)
+        obj, xvals, yvals, model = bounds.solve_relu_mip(c1, c2, apx_params=apx_params)
+        if not return_model:
+            return opt_val, xvals.data, self._next_layer_relu_out(idx, xvals.data)
+        else:
+            return model
+
+
+
+

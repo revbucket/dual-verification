@@ -181,6 +181,7 @@ class PreactBounds:
             for layer in self.network:
                 self.bounds.append(self.bounds[-1].map_layer(layer))
         self.computed = True
+        return self
 
 
 class KWBounds(PreactBounds):

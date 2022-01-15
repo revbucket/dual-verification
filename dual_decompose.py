@@ -52,7 +52,6 @@ class DecompDual:
             self.preact_bounds = PreactBounds(network, input_domain, preact_domain)
             self.preact_bounds.compute()
 
-
         # Parameters regarding z_i calculation
         self.choice = choice
         self.partition = partition
@@ -129,7 +128,10 @@ class DecompDual:
         for i, layer in enumerate(self.network):
             if not isinstance(layer, nn.ReLU) or i == 1:
                 continue
+
             total[i] = self.lambda_[i] @ (x[(i, 'A')] - x[(i, 'B')])
+
+
         total['output'] = x[(len(self.network), 'A')].item()
         total['total'] = sum(total.values())
         if by_var:
@@ -218,6 +220,7 @@ class DecompDual:
         """
 
         lambdas = self.lambda_ if (lambdas is None) else lambdas
+
         # Need to handle
 
 
@@ -306,15 +309,6 @@ class DecompDual:
 
     def merge_partitions(self, partition_dim=None, num_partitions=None):
         self.partition.merge_partitions(partition_dim=partition_dim, num_partitions=num_partitions)
-
-
-    def shrink_partitions(self, num_groups):
-        if self.partition_kwargs.get('partitions') is None:
-            return
-        for k in self.partition_kwargs['partitions']:
-            new_part = Zonotope.merge_partitions(self.partition_kwargs['partitions'][k], num_groups)
-            self.partition_kwargs['partitions'][k] = new_part
-        self.partition_kwargs['num_partitions'] = num_groups
 
 
     def make_partitions(self, idx, lambdas=None):
