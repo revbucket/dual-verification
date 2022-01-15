@@ -20,7 +20,7 @@ from partitions import PartitionGroup
 class DecompDual2:
     def __init__(self, network, input_domain, preact_domain=Hyperbox,
                  choice='naive', partition=None, preact_bounds=None,
-                 zero_dual=True): # TODO: implement KW initial dual bounds
+                 zero_dual=True, primal_mip_kwargs=None): # TODO: implement KW initial dual bounds
         self.network = network
         self.input_domain = input_domain
 
@@ -29,6 +29,7 @@ class DecompDual2:
 
         self.choice = choice
         self.partition = partition
+        self.primal_mip_kwargs = primal_mip_kwargs
         # Initialize duals
         self.rhos = self.init_duals(zero_dual)
 
@@ -279,7 +280,8 @@ class DecompDual2:
         assert isinstance(bounds, Zonotope)
         c1, c2 = self._get_coeffs(idx, rhos=rhos)
 
-        opt_val, x = self.gather_partitions().relu_program(idx, c1, c2)
+        opt_val, x = self.gather_partitions().relu_program(idx, c1, c2,
+                                                           gurobi_params=self.primal_mip_kwargs)
         return opt_val, x.data, self._next_layer_relu_out(idx, x.data)
 
 

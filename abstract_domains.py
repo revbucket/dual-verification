@@ -41,10 +41,16 @@ class Hyperbox(AbstractDomain):
     def cuda(self):
         self.lbs = self.lbs.cuda()
         self.ubs = self.ubs.cuda()
+        self.center = self.center.cuda()
+        self.rad = self.rad.cuda()
+        return self
 
     def cpu(self):
         self.lbs = self.lbs.cpu()
         self.ubs = self.ubs.cpu()
+        self.center = self.center.cpu()
+        self.rad = self.rad.cpu()
+        return self
 
     def twocol(self):
         return torch.stack([self.lbs, self.ubs]).T
@@ -237,12 +243,20 @@ class Zonotope(AbstractDomain):
 
 
     def cuda(self):
-        self.center = center.cuda()
-        self.generator = generator.cuda()
+        self.center = self.center.cuda()
+        self.generator = self.generator.cuda()
+        self.lbs = self.lbs.cuda()
+        self.ubs = self.ubs.cuda()
+        self.rad = self.rad.cuda()
+        return self
 
     def cpu(self):
-        self.center = center.cpu()
-        self.generator = generator.cpu()
+        self.center = self.center.cpu()
+        self.generator = self.generator.cpu()
+        self.lbs = self.lbs.cpu()
+        self.ubs = self.ubs.cpu()
+        self.rad = self.rad.cpu()
+        return self
 
     @classmethod
     def from_hyperbox(cls, hyperbox):
@@ -493,7 +507,7 @@ class Zonotope(AbstractDomain):
     def make_scored_partitions(self, num_parts, score_fxn):
         dim = self.generator.shape[0]
         size = math.ceil(dim / num_parts)
-        dim_scores = torch.tensor([dim_score(self, i) for i in range(dim)])
+        dim_scores = torch.tensor([dim_score(self, i) for i in range(dim)]).to(self.center.device)
         sorted_scores = list(torch.sort(dim_scores, descending=True)[1].numpy())
         groups = [sorted_scores[i: i + size] for i in range(0, dim, size)]
         return self.partition(groups)
@@ -701,7 +715,7 @@ class Zonotope(AbstractDomain):
         return model, xs, ys, all_relu_vars
 
 
-    def solve_relu_mip(self, c1, c2, apx_params=None, verbose=False, start="lbfgsb", start_kwargs={}):
+    def solve_relu_mip(self, c1, c2, apx_params=None, verbose=False, start=None, start_kwargs={}):
         # Setup the model (or load it if saved)
         if self.keep_mip:
             if self.relu_prog_model is None:
@@ -737,8 +751,8 @@ class Zonotope(AbstractDomain):
         model.update()
         model.optimize()
 
-        xvals = torch.tensor([_.x for _ in xs])
-        yvals = torch.tensor([_.x for _ in ys])
+        xvals = torch.tensor([_.x for _ in xs], device=self.center.device)
+        yvals = torch.tensor([_.x for _ in ys], device=self.center.device)
 
         return model.ObjBound, xvals, yvals, model
 
@@ -758,7 +772,7 @@ class Zonotope(AbstractDomain):
         for g, z in zonos:
             this_out = z.solve_relu_mip(c1[g], c2[g])
             outputs.append(this_out[0])
-            opt_point[g] = torch.tensor(this_out[1])
+            opt_point[g] = torch.tensor(this_out[1], device=self.center.device)
 
         return sum(outputs), opt_point
 
@@ -802,7 +816,7 @@ class Zonotope(AbstractDomain):
         points = vs[point_idxs]
         starts = points[:,0,:]
         xs = points[:,:,dim]
-        lens = xs @ torch.tensor([-1.0,1.0])
+        lens = xs @ torch.tensor([-1.0,1.0], device=self.center.device)
         diffs = points[:,1,:] - points[:,0,:]
         interp_factor = -xs[:,0] / lens
         offsets = diffs * interp_factor.view(-1, 1)
@@ -906,7 +920,7 @@ class Zonotope(AbstractDomain):
         # Set up groups
         outputs = []
         if groups is None:
-            groups = torch.rand(self.dim).sort()[1].view(-1, 2)
+            groups = torch.rand_like(self.dim).sort()[1].view(-1, 2)
         for group in groups:
             subzono = Zonotope(self.center[group], self.generator[group,:])
             outputs.append(subzono.enumerate_vertices_2d(collect_crossings=True))
@@ -1101,7 +1115,8 @@ class Polytope(AbstractDomain):
             self.model.optimize()
             ubs.append(self.model.ObjVal)
 
-        return Hyperbox(torch.Tensor(lbs), torch.Tensor(ubs))
+        return Hyperbox(torch.Tensor(lbs, device=self.center.device),
+                        torch.Tensor(ubs, device=self.center.device))
 
 
 

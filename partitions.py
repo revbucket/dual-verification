@@ -141,7 +141,7 @@ class PartitionGroup():
 		if not self.force_mip and all(len(_) == 2 for _ in groups):
 			# group_vs = zono.batch_2d_partition(groups=groups)
 			# return zono.batch_2d_relu_program(c1, c2, groups=torch.tensor(groups))#, group_vs=group_vs)
-			groups = utils.tensorfy(groups).long()
+			groups = utils.tensorfy(groups).long().to(zono.center.device)
 			if not self.cache_vertices:
 				if self.use_crossings:
 					return zono.loop_zono_rp(c1, c2, groups=groups) # uses crossings by default
@@ -170,7 +170,7 @@ class PartitionGroup():
 		obj_val = 0.0
 		argmin = torch.zeros_like(zono.center)
 		for group, subzono in zip(groups, parts):
-			min_val, sub_argmin, _, _ = subzono.solve_relu_mip(c1[group], c2[group], apx_params=None)
+			min_val, sub_argmin, _, _ = subzono.solve_relu_mip(c1[group], c2[group], apx_params=gurobi_params)
 			obj_val += min_val
 			argmin[group] = torch.tensor(sub_argmin) # DTYPES HERE?
 
