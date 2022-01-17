@@ -782,7 +782,6 @@ class Zonotope(AbstractDomain):
         self.past_rp_solution = [_.X for _ in model.getVars()]
 
 
-
         xvals = torch.tensor([_.x for _ in xs], device=self.center.device)
         yvals = torch.tensor([_.x for _ in ys], device=self.center.device)
 

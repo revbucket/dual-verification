@@ -22,6 +22,7 @@ class DecompDual2:
                  choice='naive', partition=None, preact_bounds=None,
                  zero_dual=True, primal_mip_kwargs=None, mip_start=None,
                  num_ub_iters=1): # TODO: implement KW initial dual bounds
+
         self.network = network
         self.input_domain = input_domain
 
@@ -31,6 +32,7 @@ class DecompDual2:
         self.choice = choice
         self.partition = partition
         self.primal_mip_kwargs = primal_mip_kwargs
+
         self.mip_start = mip_start
         self.num_ub_iters = num_ub_iters
         # Initialize duals
