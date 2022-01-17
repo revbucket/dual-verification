@@ -37,8 +37,9 @@ class LPRelax():
             self.input_bounds = {}
 
     @classmethod
-    def get_namer(cls, layer_idx):
-        base_name = '%s:input' % layer_idx
+    def get_namer(cls, layer_idx, relu=False):
+        base_suffix = 'input' if (relu is False) else 'relu'
+        base_name = '%s:%s' % (layer_idx, base_suffix)
         layer_namer = lambda k: base_name + ':%s' % k
         return base_name, layer_namer
 
@@ -273,7 +274,6 @@ class LPRelax():
 
         new_lbs, new_ubs = torch.tensor(new_lbs), torch.tensor(new_ubs)
         self.input_bounds[layer_idx] = torch.stack([new_lbs, new_ubs],dim=1)
-
 
 
 

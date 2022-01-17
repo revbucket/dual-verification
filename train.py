@@ -312,3 +312,35 @@ def load_mnist_data(train_or_val, batch_size=128, shuffle=True,
 
 
 
+
+
+# ================================================================
+# =           CIFAR DATA LOADERS                                 =
+# ================================================================
+
+def load_cifar_data(train_or_val, batch_size=128, shuffle=True,
+                    use_cuda=True, dataset_dir=DEFAULT_DATASET_DIR,
+                    extra_transforms=None):
+    assert train_or_val in ['train', 'val']
+    use_cuda = torch.cuda.is_available() and use_cuda
+
+    constructor = {'batch_size': batch_size,
+                   'shuffle': shuffle,
+                   'num_workers': 4,
+                   'pin_memory': use_cuda}
+    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.225, 0.225, 0.225])
+    transform_chain = transforms.Compose([
+                        transforms.RandomHorizontalFlip(),
+                        transforms.RandomCrop(32, 4),
+                        transforms.ToTensor(),
+                        normalize,])
+
+
+
+    CIFAR_dataset = datasets.CIFAR10(root=dataset_dir,
+                                     train=(train_or_val == 'train'),
+                                     download=True,
+                                     transform=transform_chain)
+    return torch.utils.data.DataLoader(CIFAR_dataset, **constructor)
+

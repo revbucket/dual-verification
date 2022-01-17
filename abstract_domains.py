@@ -41,10 +41,16 @@ class Hyperbox(AbstractDomain):
     def cuda(self):
         self.lbs = self.lbs.cuda()
         self.ubs = self.ubs.cuda()
+        self.center = self.center.cuda()
+        self.rad = self.rad.cuda()
+        return self
 
     def cpu(self):
         self.lbs = self.lbs.cpu()
         self.ubs = self.ubs.cpu()
+        self.center = self.center.cpu()
+        self.rad = self.rad.cpu()
+        return self
 
     def twocol(self):
         return torch.stack([self.lbs, self.ubs]).T
@@ -82,7 +88,7 @@ class Hyperbox(AbstractDomain):
         return Hyperbox(new_lbs, new_ubs)
 
 
-    def solve_lp(self, obj: torch.Tensor, get_argmin: bool = False):
+    def solve_lp(self, obj: torch.Tensor, bias=0.0, get_argmin: bool = False):
         """ Solves linear programs like min <obj, x> over hyperbox
         ARGS: obj : objective vector
               get_opt_point : if True, returns optimal point too
@@ -91,7 +97,7 @@ class Hyperbox(AbstractDomain):
         # Do this via centers and rads
         signs = torch.sign(obj)
         opt_point = F.relu(signs) * self.lbs + F.relu(-signs) * self.ubs
-        opt_val = obj @ opt_point
+        opt_val = obj @ opt_point + bias
         if get_argmin:
             return opt_val, opt_point
         return opt_val
@@ -193,6 +199,8 @@ class Zonotope(AbstractDomain):
         self.keep_mip = True
         self.relu_prog_model = None
         self.max_order = max_order
+        self.relu_prog_model = None
+        self.past_rp_solution = None
 
         self._compute_state()
 
@@ -237,12 +245,20 @@ class Zonotope(AbstractDomain):
 
 
     def cuda(self):
-        self.center = center.cuda()
-        self.generator = generator.cuda()
+        self.center = self.center.cuda()
+        self.generator = self.generator.cuda()
+        self.lbs = self.lbs.cuda()
+        self.ubs = self.ubs.cuda()
+        self.rad = self.rad.cuda()
+        return self
 
     def cpu(self):
-        self.center = center.cpu()
-        self.generator = generator.cpu()
+        self.center = self.center.cpu()
+        self.generator = self.generator.cpu()
+        self.lbs = self.lbs.cpu()
+        self.ubs = self.ubs.cpu()
+        self.rad = self.rad.cpu()
+        return self
 
     @classmethod
     def from_hyperbox(cls, hyperbox):
@@ -259,12 +275,12 @@ class Zonotope(AbstractDomain):
     def twocol(self):
         return torch.stack([self.lbs, self.ubs]).T
 
-    def solve_lp(self, obj: torch.Tensor, get_argmin: bool = False):
+    def solve_lp(self, obj: torch.Tensor, bias=0.0, get_argmin: bool = False):
         # RETURNS: either optimal_value or (optimal_value, optimal point)
         center_val = self.center @ obj
         opt_signs = -torch.sign(self.generator.T @ obj)
         opt_point = self.center + self.generator @ opt_signs
-        opt_val = opt_point @ obj
+        opt_val = opt_point @ obj + bias
         if get_argmin:
             return (opt_val, opt_point)
         return opt_val
@@ -402,6 +418,26 @@ class Zonotope(AbstractDomain):
             y = (1 - gamma) * y + gamma * s_plus(y)
         return f_prime(y), y, self(y)
 
+    def fw_rp(self, c1, c2, num_iter=1000, rand_init=True, num_init=1):
+        zeros = torch.zeros_like(c2)
+
+        def sub_argmin(x):
+            # Finds the s in Z that minimizes s@grad_f(x)
+            grad_f = c1 + torch.where(x > 0, c2, zeros)
+            return self.center + self.generator @ torch.sign(-grad_f @ self.generator)
+
+        if rand_init:
+            x = self(torch.rand_like(self.generator[0]) *2 - 1.0)
+        else:
+            x = self.center
+
+        for step in range(num_iter):
+            gamma = 2 / float(step + 2.0)
+            x = (1 -gamma) * x + gamma * sub_argmin(x)
+        return c1@x + c2 @ x.relu(), x
+
+
+
 
     def solve_relu_simplex(self, c1, c2, iters=3):
         best_o, best_y = float('inf'), None
@@ -493,7 +529,7 @@ class Zonotope(AbstractDomain):
     def make_scored_partitions(self, num_parts, score_fxn):
         dim = self.generator.shape[0]
         size = math.ceil(dim / num_parts)
-        dim_scores = torch.tensor([dim_score(self, i) for i in range(dim)])
+        dim_scores = torch.tensor([dim_score(self, i) for i in range(dim)]).to(self.center.device)
         sorted_scores = list(torch.sort(dim_scores, descending=True)[1].numpy())
         groups = [sorted_scores[i: i + size] for i in range(0, dim, size)]
         return self.partition(groups)
@@ -701,7 +737,7 @@ class Zonotope(AbstractDomain):
         return model, xs, ys, all_relu_vars
 
 
-    def solve_relu_mip(self, c1, c2, apx_params=None, verbose=False, start="lbfgsb", start_kwargs={}):
+    def solve_relu_mip(self, c1, c2, apx_params=None, verbose=False, start=None, start_kwargs={}):
         # Setup the model (or load it if saved)
         if self.keep_mip:
             if self.relu_prog_model is None:
@@ -721,6 +757,7 @@ class Zonotope(AbstractDomain):
         model.setObjective(gb.LinExpr(c1, xs) + gb.LinExpr(c2, relu_vars),
                            gb.GRB.MINIMIZE)
 
+        '''
         if start is not None:
             if start == "simplex":
                 y_start = self.solve_relu_simplex(c1, c2, **start_kwargs)[1]
@@ -733,12 +770,21 @@ class Zonotope(AbstractDomain):
 
             for y, y_s in zip(ys, y_start):
                 y.Start = y_s.item()
+        '''
+
+        if start == 'prev' and self.past_rp_solution is not None:
+            for var, past_val in zip(model.getVars(), self.past_rp_solution):
+                var.Start = past_val
 
         model.update()
         model.optimize()
 
-        xvals = torch.tensor([_.x for _ in xs])
-        yvals = torch.tensor([_.x for _ in ys])
+        self.past_rp_solution = [_.X for _ in model.getVars()]
+
+
+
+        xvals = torch.tensor([_.x for _ in xs], device=self.center.device)
+        yvals = torch.tensor([_.x for _ in ys], device=self.center.device)
 
         return model.ObjBound, xvals, yvals, model
 
@@ -758,7 +804,7 @@ class Zonotope(AbstractDomain):
         for g, z in zonos:
             this_out = z.solve_relu_mip(c1[g], c2[g])
             outputs.append(this_out[0])
-            opt_point[g] = torch.tensor(this_out[1])
+            opt_point[g] = torch.tensor(this_out[1], device=self.center.device)
 
         return sum(outputs), opt_point
 
@@ -802,7 +848,7 @@ class Zonotope(AbstractDomain):
         points = vs[point_idxs]
         starts = points[:,0,:]
         xs = points[:,:,dim]
-        lens = xs @ torch.tensor([-1.0,1.0])
+        lens = xs @ torch.tensor([-1.0,1.0], device=self.center.device)
         diffs = points[:,1,:] - points[:,0,:]
         interp_factor = -xs[:,0] / lens
         offsets = diffs * interp_factor.view(-1, 1)
@@ -906,7 +952,7 @@ class Zonotope(AbstractDomain):
         # Set up groups
         outputs = []
         if groups is None:
-            groups = torch.rand(self.dim).sort()[1].view(-1, 2)
+            groups = torch.rand_like(self.dim).sort()[1].view(-1, 2)
         for group in groups:
             subzono = Zonotope(self.center[group], self.generator[group,:])
             outputs.append(subzono.enumerate_vertices_2d(collect_crossings=True))
@@ -1101,7 +1147,8 @@ class Polytope(AbstractDomain):
             self.model.optimize()
             ubs.append(self.model.ObjVal)
 
-        return Hyperbox(torch.Tensor(lbs), torch.Tensor(ubs))
+        return Hyperbox(torch.Tensor(lbs, device=self.center.device),
+                        torch.Tensor(ubs, device=self.center.device))
 
 
 

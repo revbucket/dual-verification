@@ -20,7 +20,8 @@ from partitions import PartitionGroup
 class DecompDual2:
     def __init__(self, network, input_domain, preact_domain=Hyperbox,
                  choice='naive', partition=None, preact_bounds=None,
-                 zero_dual=True): # TODO: implement KW initial dual bounds
+                 zero_dual=True, primal_mip_kwargs=None, mip_start=None,
+                 num_ub_iters=1): # TODO: implement KW initial dual bounds
         self.network = network
         self.input_domain = input_domain
 
@@ -29,6 +30,9 @@ class DecompDual2:
 
         self.choice = choice
         self.partition = partition
+        self.primal_mip_kwargs = primal_mip_kwargs
+        self.mip_start = mip_start
+        self.num_ub_iters = num_ub_iters
         # Initialize duals
         self.rhos = self.init_duals(zero_dual)
 
@@ -52,6 +56,7 @@ class DecompDual2:
         rhos = self.rhos if (rhos is None) else rhos
 
         # subproblem indices are {0, 1, 3, 5,...,}
+        # Now with added bias term...
 
         if idx == 0:
             # Special case
@@ -160,25 +165,40 @@ class DecompDual2:
         # Outputs here are (opt_val, argmin, next_layer_argmin)
         rhos = rhos if (rhos is not None) else self.rhos
 
-        if self.choice == 'naive' or isinstance(self.preact_bounds[idx], Hyperbox):
-            return self.get_ith_primal_naive(idx, rhos)
-        elif self.choice == 'partition':
-            return self.get_ith_primal_partition(idx, rhos)
-        elif self.choice == 'simplex':
-            return self.get_ith_primal_simplex(idx, rhos)
-        elif self.choice == 'partition_simplex':
-            return self.get_ith_primal_simplex_partition(idx, rhos)
-        elif self.choice == 'lbfgsb':
-            return self.get_ith_primal_lbfgsb(idx, rhos)
-        elif self.choice == 'lbfgsb_partition':
-            return self.get_ith_primal_lbfgsb_partition(idx, rhos)
+        method_dict = {'naive': self.get_ith_primal_naive,
+                       'partition': self.get_ith_primal_partition,
+                       'simplex': self.get_ith_primal_simplex,
+                       'simplex_partition': self.get_ith_primal_simplex_partition,
+                       'lbfgsb': self.get_ith_primal_lbfgsb,
+                       'lbfgsb_partition': self.get_ith_primal_lbfgsb_partition,
+                       'exact': self.get_ith_primal_mip
+                      }
+
+        ub_methods = {'simplex', 'simplex_partition', 'lbfgsb', 'lbfgsb_partition'}
+
+
+        if isinstance(self.preact_bounds[idx], Hyperbox): # Hyperbox means do naive case
+            return method_dict['naive'](idx, rhos)
+
+        if self.choice in ub_methods:
+            min_val, min_argmin_0, min_argmin_1 = float('inf'), None, None
+            for i in range(self.num_ub_iters):
+                val, argmin_0, argmin_1 = method_dict[self.choice](idx, rhos)
+                if val < min_val:
+                    min_val = val
+                    min_argmin_0 = argmin_0
+                    min_argmin_1 = argmin_1
+            return min_val, min_argmin_0, min_argmin_1
         else:
-            raise NotImplementedError()
+            return method_dict[self.choice](idx, rhos)
 
 
-    def dual_ascent(self, num_steps, optim_obj=None, verbose=True):
+    def dual_ascent(self, num_steps, optim_obj=None, verbose=True, logger=None):
+        """ Runs dual ascent for num_steps, using the optim_obj specified
+            logger is a fxn that takes (self, step#) as args
+        """
         optim_obj = optim_obj if (optim_obj is not None) else optim.Adam(self.parameters(), lr=1e-3)
-
+        logger = (lambda self, iter_num: None) if (logger is None) else logger
         last_time = time.time()
         for step in range(num_steps):
             optim_obj.zero_grad()
@@ -187,6 +207,7 @@ class DecompDual2:
             if verbose and (step % verbose) == 0:
                 print("Iter %02d | Certificate: %.02f  | Time: %.02f" % (step, -loss_val, time.time() - last_time))
                 last_time = time.time()
+            logger(self, step)
             optim_obj.step()
 
         return self.lagrangian()
@@ -204,6 +225,8 @@ class DecompDual2:
 
     def get_0th_primal(self, rhos):
         """ Solves min_x -rho[1] @ layers[0](x) over x in input
+                    (actually) min_x -rho[1] @ (Wx + b)
+                               so need to subtract -rho[1] @b
             RETURNS: (x, layers[0](x))
         """
         _, out_coeff = self._get_coeffs(0, rhos=rhos)
@@ -267,10 +290,12 @@ class DecompDual2:
         return self.partition
 
 
-    def merge_partitions(self, partition_dim=None, num_partitions=None):
-        self.gather_partitions().merge_partitions(partition_dim=partition_dim,
-                                                  num_partitions=num_partitions)
+    def merge_partitions(self, partition_dim=None, num_partitions=None, copy_obj=True):
         self.partition.save_models = True # Generally want to do this to save time later
+        self.partition = self.gather_partitions().merge_partitions(partition_dim=partition_dim,
+                                                                   num_partitions=num_partitions,
+                                                                   copy_obj=copy_obj)
+
 
 
     def get_ith_primal_partition(self, idx: int, rhos):
@@ -279,9 +304,10 @@ class DecompDual2:
         assert isinstance(bounds, Zonotope)
         c1, c2 = self._get_coeffs(idx, rhos=rhos)
 
-        opt_val, x = self.gather_partitions().relu_program(idx, c1, c2)
+        opt_val, x = self.gather_partitions().relu_program(idx, c1, c2,
+                                                           gurobi_params=self.primal_mip_kwargs,
+                                                           start=self.mip_start)
         return opt_val, x.data, self._next_layer_relu_out(idx, x.data)
-
 
 
     # -------------------------- SIMPLEX -------------------------------------------
@@ -292,7 +318,7 @@ class DecompDual2:
         c1, c2 = self._get_coeffs(idx, rhos=rhos)
         opt_val, yvals = bounds.solve_relu_simplex(c1, c2)
         x = bounds(yvals)
-        return opt_val, x.data, self._next_layer_relu_out(x.data)
+        return opt_val, x.data, self._next_layer_relu_out(idx, x.data)
 
     def get_ith_primal_simplex_partition(self, idx: int, rhos):
         bounds = self.preact_bounds[idx]
@@ -320,15 +346,23 @@ class DecompDual2:
         opt_val, x = self.gather_partitions().relu_program_lbfgsb(idx, c1, c2)
         return opt_val, x.data, self._next_layer_relu_out(idx, x.data)
 
+    # ---------------------- Frank Wolfe ----------------------------------------
+
+    def get_ith_primal_fw(self, idx: int, rhos):
+        bounds = self.preact_bounds[idx]
+        c1, c2 = self._get_coeffs
+
+
 
     # ---------------------- Other MIP-y methods -------------------------------------
     def get_ith_primal_mip(self, idx: int, rhos, apx_params=None, return_model=False):
         bounds = self.preact_bounds[idx]
         assert isinstance(bounds, Zonotope)
+        apx_params = apx_params if (apx_params is not None) else self.primal_mip_kwargs
         c1, c2 = self._get_coeffs(idx, rhos=rhos)
         obj, xvals, yvals, model = bounds.solve_relu_mip(c1, c2, apx_params=apx_params)
         if not return_model:
-            return opt_val, xvals.data, self._next_layer_relu_out(idx, xvals.data)
+            return obj, xvals.data, self._next_layer_relu_out(idx, xvals.data)
         else:
             return model
 
