@@ -69,9 +69,13 @@ class DecompDual2:
             elif isinstance(self.network[0], nn.Conv2d):
                 conv = self.network[0]
                 output_shape = utils.conv_output_shape(conv)
+                # Need to compute output padding here
+                transpose_shape = utils.conv_transpose_shape(conv)
+                output_padding = (conv.input_shape[1] - transpose_shape[1],
+                                  conv.input_shape[2] - transpose_shape[2])
                 out_coeff = F.conv_transpose2d(rhos[1].view((1,) + output_shape),
-                                               conv.weight, None, conv.stride, conv.padding, 0,
-                                               conv.groups, conv.dilation).flatten()
+                                               conv.weight, None, conv.stride, conv.padding,
+                                               output_padding, conv.groups, conv.dilation).flatten()
             else:
                 raise NotImplementedError()
 
@@ -82,9 +86,12 @@ class DecompDual2:
             elif isinstance(self.network[idx + 1], nn.Conv2d):
                 conv = self.network[idx + 1]
                 output_shape = utils.conv_output_shape(conv)
+                transpose_shape = utils.conv_transpose_shape(conv)
+                output_padding = (conv.input_shape[1] - transpose_shape[1],
+                                  conv.input_shape[2] - transpose_shape[2])
                 out_coeff = F.conv_transpose2d(rhos[idx + 2].view((1,) + output_shape),
-                                               conv.weight, None, conv.stride, conv.padding, 0,
-                                               conv.groups, conv.dilation).flatten()
+                                               conv.weight, None, conv.stride, conv.padding,
+                                               output_padding, conv.groups, conv.dilation).flatten()
 
         else:
             lin_coeff = -rhos[idx]

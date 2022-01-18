@@ -232,7 +232,10 @@ class PGD:
             Returns the adversarial example (not the noise)
         """
         shape = x.shape
-        x = x.view(shape[0], -1)
+        if hasattr(self.network[0], 'input_shape'):
+            x = x.view((-1,) + self.network[0].input_shape)
+        else:
+            x = x.view(shape[0], -1)
         machine_eps = torch.ones(x.shape[0], dtype=x.dtype) * 1e-12
 
         eta = torch.zeros_like(x, requires_grad=True)

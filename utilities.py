@@ -63,6 +63,23 @@ def conv_output_shape(conv, input_shape=None):
     out_w = math.floor((w + 2 * conv.padding[1] - conv.dilation[1] * (conv.kernel_size[1] - 1) -1) / conv.stride[1] + 1)
     return (conv.out_channels, out_h, out_w)
 
+def conv_transpose_shape(conv, input_shape=None):
+    """ When trying to transpose a given conv operator, returns the shape given
+        by blindly applying conv2d_transpose
+    """
+    c, h, w = conv_output_shape(conv, input_shape=input_shape)
+    s0, s1 = conv.stride
+    p0, p1 = conv.padding
+    d0, d1 = conv.dilation
+    k0, k1 = conv.kernel_size
+
+    out_h = (h - 1) * s0 - 2 * p0 + d0 *( k0 - 1) + 1
+    out_w = (w - 1) * s1 - 2 * p1 + d1 * (k1 - 1) + 1
+    return (conv.in_channels, out_h, out_w)
+
+    # Maps output -> input (useful for determining padding)
+
+
 
 def flatten(lol):
     output = []

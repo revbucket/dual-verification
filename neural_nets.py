@@ -34,11 +34,16 @@ class FFNet(nn.Module):
 
     def __init__(self, net, dtype=torch.float):
         super(FFNet, self).__init__()
+        # Remove all flattens
+        if isinstance(net, nn.Sequential):
+            net = nn.Sequential(*[_ for _ in net if not isinstance(_, nn.Flatten)])
+
+
+        # Save important attributes
         self.net = net
         self.dtype = dtype
         self.shapes = None
         self._support_check()
-
 
         # Auxiliary attributes
         self.linear_idxs = set([i for i, layer in enumerate(self.net)
@@ -57,7 +62,6 @@ class FFNet(nn.Module):
         for layer in self.net:
             assert any([isinstance(layer, tuple(self.SUPPORTED_LINS)),
                         isinstance(layer, tuple(self.SUPPORTED_NONLINS))])
-
 
 
     @classmethod
