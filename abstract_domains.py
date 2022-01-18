@@ -676,6 +676,7 @@ class Zonotope(AbstractDomain):
         x_namer = namer('x')
         xs = []
         eps = 1e-6
+
         for idx, gen_row in enumerate(self.generator):
             xs.append(model.addVar(lb=self.lbs[idx] - eps,
                                    ub=self.ubs[idx] + eps,
@@ -688,11 +689,24 @@ class Zonotope(AbstractDomain):
                 'xs': xs,
                 'ys': ys}
 
+    def _encode_mip2(self):
+        eps =1e-6
+        model = gb.Model()
+        ys = model.addMVar(self.gensize, lb=-1, ub=1, name='y')
+        model.update()
+
+        xs = model.addMVar(self.dim, lb=self.lbs -eps, ub=self.ubs + eps, name='x')
+        model.addConstr(self.generator.cpu().numpy() @ ys + self.center.cpu().numpy() == xs)
+        model.update()
+        return {'model': model,
+                'xs': xs,
+                'ys': ys}
+
+
 
     def _setup_relu_mip(self):
         """ Sets up the optimization program:
             min c1*z + c2*Relu(z) over this zonotope
-
         if apx_params is None, we return only a LOWER BOUND
         on the objective value
         Returns
@@ -736,15 +750,47 @@ class Zonotope(AbstractDomain):
 
         return model, xs, ys, all_relu_vars
 
+    def _setup_relu_mip2(self):
+        """ Sets up the optimization program:
+            min c1*z + c2*Relu(z) over this zonotope
+
+        if apx_params is None, we return only a LOWER BOUND
+        on the objective value
+        Returns
+            (opt_val, argmin x, argmin y)
+        """
+        mip_dict = self._encode_mip2()
+        model = mip_dict['model']
+
+
+        xs, ys = mip_dict['xs'], mip_dict['ys']
+
+        # Now add ReLU constraints, using the big-M encoding
+        unc_idxs = ((self.lbs * self.ubs) < 0).nonzero().flatten().cpu()
+
+        relu_vars = model.addMVar(len(unc_idxs), lb=0, ub=self.ubs[unc_idxs], name='relu')
+        zs = model.addMVar(len(unc_idxs), vtype=gb.GRB.BINARY, name='z')
+
+        model.addConstr(relu_vars >= xs[unc_idxs])
+
+        # Maybe diagflats aren't best here...
+        model.addConstr(relu_vars <= np.diagflat(self.ubs[unc_idxs].detach().cpu().numpy()) @ zs)
+        model.addConstr(relu_vars + self.lbs[unc_idxs].squeeze().detach().cpu().numpy() <=
+                        xs[unc_idxs] + np.diagflat(self.lbs[unc_idxs].detach().cpu().numpy()) @ zs)
+
+        model.update()
+
+        return model, xs, ys, relu_vars, unc_idxs
+
 
     def solve_relu_mip(self, c1, c2, apx_params=None, verbose=False, start=None, start_kwargs={}):
         # Setup the model (or load it if saved)
         if self.keep_mip:
             if self.relu_prog_model is None:
-                self.relu_prog_model = self._setup_relu_mip()
-            model, xs, ys, relu_vars = self.relu_prog_model
+                self.relu_prog_model = self._setup_relu_mip2()
+            model, xs, ys, relu_vars, unc_idxs = self.relu_prog_model
         else:
-            model, xs, ys, relu_vars = self._setup_relu_mip()
+            model, xs, ys, relu_vars, unc_idxs = self._setup_relu_mip2()
 
         if verbose is False:
             model.setParam('OutputFlag', False)
@@ -754,23 +800,13 @@ class Zonotope(AbstractDomain):
             model.setParam(k, v)
 
         # Set the objective and optimize
-        model.setObjective(gb.LinExpr(c1, xs) + gb.LinExpr(c2, relu_vars),
-                           gb.GRB.MINIMIZE)
-
-        '''
-        if start is not None:
-            if start == "simplex":
-                y_start = self.solve_relu_simplex(c1, c2, **start_kwargs)[1]
-            elif start == "fw":
-                y_start = self.solve_relu_fw(c1, c2, **start_kwargs)[1]
-            elif start == "lbfgsb":
-                y_start = self.solve_relu_lbfgsb(c1, c2, **start_kwargs)[1]
-            else:
-                raise NotImplementedError()
-
-            for y, y_s in zip(ys, y_start):
-                y.Start = y_s.item()
-        '''
+        c1 = c1.detach().cpu().numpy()
+        c2 = c2[unc_idxs].squeeze().detach().cpu().numpy()
+        try:
+            model.setObjective(c1 @ xs + c2 @ relu_vars, gb.GRB.MINIMIZE)
+        except Exception as err:
+            # In the case that |unc_idxs| == 1
+            model.setObjective(c1 @ xs + c2 * relu_vars, gb.GRB.MINIMIZE)
 
         if start == 'prev' and self.past_rp_solution is not None:
             for var, past_val in zip(model.getVars(), self.past_rp_solution):

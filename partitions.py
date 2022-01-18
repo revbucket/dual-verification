@@ -107,7 +107,7 @@ class PartitionGroup():
 			self.groups[i] = groups
 			if self.save_models:
 				subzonos = self.order_sweep([_[1] for _ in zono.partition(groups)])
-				[_._setup_relu_mip() for _ in subzonos]
+				[_._setup_relu_mip2() for _ in subzonos]
 				self.subzonos[i] = subzonos
 			return groups
 		else:
@@ -173,7 +173,9 @@ class PartitionGroup():
 			min_val, sub_argmin, _, _ = subzono.solve_relu_mip(c1[group], c2[group], apx_params=gurobi_params,
 				                                               start=start)
 			obj_val += min_val
-			argmin[group] = torch.tensor(sub_argmin) # DTYPES HERE?
+
+			sub_argmin = torch.tensor(sub_argmin).type(argmin.dtype).to(argmin.device).flatten()
+			argmin[group] = sub_argmin
 
 		return obj_val, argmin
 
@@ -219,7 +221,7 @@ class PartitionGroup():
 				for i, group in new_groups.items():
 					zono = self.base_zonotopes[i]
 					subzonos = self.order_sweep([_[1] for _ in zono.partition(group)])
-					[_._setup_relu_mip() for _ in subzonos]
+					[_._setup_relu_mip2() for _ in subzonos]
 					new_subzonos[i] = subzonos
 
 		if copy_obj:
