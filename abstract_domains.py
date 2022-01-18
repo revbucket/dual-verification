@@ -772,12 +772,19 @@ class Zonotope(AbstractDomain):
         relu_vars = model.addMVar(len(unc_idxs), lb=0, ub=self.ubs[unc_idxs], name='relu')
         zs = model.addMVar(len(unc_idxs), vtype=gb.GRB.BINARY, name='z')
 
-        model.addConstr(relu_vars >= xs[unc_idxs])
+        if len(unc_idxs) > 1:
+            model.addConstr(relu_vars >= xs[unc_idxs])
 
-        # Maybe diagflats aren't best here...
-        model.addConstr(relu_vars <= np.diagflat(self.ubs[unc_idxs].detach().cpu().numpy()) @ zs)
-        model.addConstr(relu_vars + self.lbs[unc_idxs].squeeze().detach().cpu().numpy() <=
+            # Maybe diagflats aren't best here...
+            model.addConstr(relu_vars <= np.diagflat(self.ubs[unc_idxs].detach().cpu().numpy()) @ zs)
+            model.addConstr(relu_vars + self.lbs[unc_idxs].squeeze().detach().cpu().numpy() <=
                         xs[unc_idxs] + np.diagflat(self.lbs[unc_idxs].detach().cpu().numpy()) @ zs)
+        else:
+            for i, idx in enumerate(unc_idxs):
+                model.addConstr(relu_vars[i] >= xs[idx])
+                model.addConstr(relu_vars[i] <= self.ubs[idx].item() * zs[i])
+                model.addConstr(relu_vars[i] <= xs[idx] - (1- zs[i]) * self.lbs[idx].item())
+
 
         model.update()
 
