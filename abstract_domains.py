@@ -10,6 +10,7 @@ import math
 import copy
 import numpy as np
 import scipy.optimize
+import sys
 
 class AbstractDomain:
     """ Abstract class that handles forward passes """
@@ -823,6 +824,43 @@ class Zonotope(AbstractDomain):
 
         return model.ObjBound, xvals, yvals, model
 
+
+    def bound_relu_sdp(self, c1, c2):
+        import mosek.fusion as mf
+        c1, c2 = c1.detach().numpy().tolist(), c2.detach().numpy().tolist()
+        b, G = self.center.numpy().tolist(), self.generator.numpy().tolist()
+        n, m = self.dim, self.generator.shape[1]
+        E = mf.Expr
+
+        M = mf.Model("reluprog")
+
+        X = M.variable(mf.Domain.inPSDCone(1+m+n))
+
+        Xx = X.slice([1, 0], [m+1, 1])
+        Xz = X.slice([m+1, 0], [m+n+1, 1])
+        Xxx = X.slice([1, 1], [m+1, m+1])
+        Xxz = X.slice([1, m+1], [m+1, m+n+1])
+        Xzz = X.slice([m+1, m+1], [m+n+1, m+n+1])
+
+        ge0 = mf.Domain.greaterThan(0.0)
+        eq0 = mf.Domain.equalsTo(0.0)
+
+        y = E.add(E.mul(G, Xx), b)
+        M.constraint(Xz, ge0)
+        M.constraint(E.sub(Xz, y), ge0)
+        M.constraint(E.sub(Xzz.diag(), E.add(E.mulDiag(G, Xxz), E.mulElm(Xz, [[_] for _ in b]))), eq0)
+        M.constraint(E.sub(1, Xxx.diag()), ge0)
+        M.constraint(E.sub(X.index(0, 0), 1), eq0)
+
+        M.objective(
+            mf.ObjectiveSense.Minimize,
+            E.add(E.dot(c1, y), E.dot(c2, Xz))
+        )
+
+        M.setLogHandler(sys.stdout)
+        M.solve()
+
+        return M.primalObjValue()
 
 
     def k_group_relu(self, c1, c2, k=10):
