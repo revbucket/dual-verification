@@ -288,10 +288,11 @@ class DecompDual2:
         # Use this method to access partition object.
         base_zonotopes = {i: self.preact_bounds[i] for i, bound in enumerate(self.preact_bounds)
                           if i not in self.network.linear_idxs}
+        input_shapes = [l.input_shape for l in self.network.net]
         if self.partition is None:
             partition = PartitionGroup(base_zonotopes, style='fixed_dim', partition_rule='random',
                                        save_partitions=True, save_models=False, partition_dim=2,
-                                       use_crossings=True)
+                                       use_crossings=True, input_shapes=input_shapes)
             self.partition = partition
 
         if self.partition.base_zonotopes is None:

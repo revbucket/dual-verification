@@ -13,7 +13,7 @@ class PartitionGroup():
 				 partition_rule='random', save_partitions=True,
 				 save_models=True, num_partitions=None, partition_dim=None,
 				 max_order=None, force_mip=False, cache_vertices=True,
-				 use_crossings=True):
+				 use_crossings=True, input_shapes=None):
 		""" Parameters for partitioning.
 		Two basic styles for partitioning:
 			- fixed number of partitions per zonotope  (fixed_part)
@@ -54,6 +54,7 @@ class PartitionGroup():
 		self.cache_vertices = cache_vertices
 		self.use_crossings = use_crossings
 		self.vertices = {}
+		self.input_shapes = input_shapes
 
 		if self.base_zonotopes is not None:
 			self.make_all_partitions() # modifies state if save_partitions=True
@@ -94,6 +95,24 @@ class PartitionGroup():
 		# -- can either have random or scored fxn
 		if self.partition_rule == 'random':
 			groups = utils.partition(list(range(zono.dim)), num_parts)
+
+		elif self.partition_rule in ("depthwise", "spatial"):
+			import numpy as np
+			if i >= len(self.input_shapes) or len(self.input_shapes[i]) != 3:
+				groups = utils.partition(list(range(zono.dim)), num_parts)
+			else:
+				shape = self.input_shapes[i]
+				assert shape.numel() == zono.dim
+				# Note: spatial rule should probably use both axes somehow
+				axis = 0 if self.partition_rule == "depthwise" else -1
+				# Note: sort of relying on Python sort being stable
+				indexes = sorted(
+					list(range(zono.dim)),
+					key=lambda i: utils.unravel_index(i, shape)[axis]
+				)
+				part_dim = zono.dim // num_parts
+				groups = [indexes[i: i+part_dim] for i in range(0, zono.dim, part_dim)]
+
 		else:
 			# if scored, then kwargs['score_fxn'] is a list of fxns (zono, idx)->score
 			score_fxn = kwargs['score_fxn'][i]
