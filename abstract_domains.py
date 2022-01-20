@@ -799,14 +799,16 @@ class Zonotope(AbstractDomain):
         xs, ys = mip_dict['xs'], mip_dict['ys']
 
         # Now add ReLU constraints, using the big-M encoding
-        unc_idxs = ((self.lbs * self.ubs) < 0).nonzero().flatten().cpu()
-
+        off_neurons = (self.ubs < 0)
+        on_neurons = (self.lbs >= 0)
+        on_idxs = on_neurons.nonzero().flatten().cpu()
+        unc_neurons = ~(off_neurons + on_neurons)
+        unc_idxs = unc_neurons.nonzero().flatten().cpu()
         relu_vars = model.addMVar(len(unc_idxs), lb=0, ub=self.ubs[unc_idxs], name='relu')
         zs = model.addMVar(len(unc_idxs), vtype=gb.GRB.BINARY, name='z')
 
         if len(unc_idxs) > 1:
             model.addConstr(relu_vars >= xs[unc_idxs])
-
             # Maybe diagflats aren't best here...
             model.addConstr(relu_vars <= np.diagflat(self.ubs[unc_idxs].detach().cpu().numpy()) @ zs)
             model.addConstr(relu_vars + self.lbs[unc_idxs].squeeze().detach().cpu().numpy() <=
@@ -820,7 +822,7 @@ class Zonotope(AbstractDomain):
 
         model.update()
 
-        return model, xs, ys, relu_vars, unc_idxs
+        return model, xs, ys, relu_vars, on_idxs, unc_idxs
 
 
     def solve_relu_mip(self, c1, c2, apx_params=None, verbose=False, start=None, start_kwargs={},
@@ -829,9 +831,9 @@ class Zonotope(AbstractDomain):
         if self.keep_mip:
             if self.relu_prog_model is None:
                 self.relu_prog_model = self._setup_relu_mip2(box_bounds)
-            model, xs, ys, relu_vars, unc_idxs = self.relu_prog_model
+            model, xs, ys, relu_vars, on_idxs, unc_idxs = self.relu_prog_model
         else:
-            model, xs, ys, relu_vars, unc_idxs = self._setup_relu_mip2(box_bounds)
+            model, xs, ys, relu_vars, on_idxs, unc_idxs = self._setup_relu_mip2(box_bounds)
 
 
 
@@ -842,13 +844,17 @@ class Zonotope(AbstractDomain):
             model.setParam(k, v)
 
         # Set the objective and optimize
-        c1 = c1.detach().cpu().numpy()
-        c2 = c2[unc_idxs].squeeze().detach().cpu().numpy()
+
+        lin_obj = torch.clone(c1).squeeze().detach().cpu().numpy()
+        lin_obj[on_idxs] += c2[on_idxs].detach().cpu().numpy()
+        relu_obj = c2[unc_idxs].squeeze().detach().cpu().numpy()
+
         try:
-            model.setObjective(c1 @ xs + c2 @ relu_vars, gb.GRB.MINIMIZE)
+            model.setObjective(lin_obj @ xs + relu_obj @ relu_vars, gb.GRB.MINIMIZE)
         except Exception as err:
+            raise err
             # In the case that |unc_idxs| == 1
-            model.setObjective(c1 @ xs + c2 * relu_vars, gb.GRB.MINIMIZE)
+            model.setObjective(lin_obj @ xs + relu_obj * relu_vars, gb.GRB.MINIMIZE)
 
         if start == 'prev' and self.past_rp_solution is not None:
             for var, past_val in zip(model.getVars(), self.past_rp_solution):
@@ -856,7 +862,6 @@ class Zonotope(AbstractDomain):
 
         model.update()
         model.optimize()
-
         self.past_rp_solution = [_.X for _ in model.getVars()]
 
 
@@ -864,6 +869,7 @@ class Zonotope(AbstractDomain):
         yvals = torch.tensor([_.x for _ in ys], device=self.center.device)
 
         return model.ObjBound, xvals, yvals, model
+
 
 
     def bound_relu_sdp(self, c1, c2):
