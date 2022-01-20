@@ -306,13 +306,12 @@ class DecompDual2:
         return self.partition
 
 
-    def merge_partitions(self, partition_dim=None, num_partitions=None, copy_obj=True,
-                         only_idx=None):
+    def merge_partitions(self, partition_dim=None, num_partitions=None, copy_obj=True):
+
         self.partition.save_models = True # Generally want to do this to save time later
         self.partition = self.gather_partitions().merge_partitions(partition_dim=partition_dim,
                                                                    num_partitions=num_partitions,
-                                                                   copy_obj=copy_obj,
-                                                                   only_idx=only_idx)
+                                                                   copy_obj=copy_obj)
 
 
 

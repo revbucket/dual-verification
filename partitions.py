@@ -90,7 +90,11 @@ class PartitionGroup():
 		dim = zono.dim
 		# First make the groups
 		if self.style == 'fixed_dim':
-			num_parts = math.ceil(dim / self.partition_dim)
+
+			if isinstance(self.partition_dim, int):
+				num_parts = math.ceil(dim / self.partition_dim)
+			else:
+				num_parts = math.ceil(dim / self.partition_dim[i])
 		else:
 			num_parts = self.num_partitions
 
@@ -202,93 +206,115 @@ class PartitionGroup():
 		return obj_val, argmin
 
 
-	def merge_partitions(self, partition_dim=None, num_partitions=None, copy_obj=True, only_idx=None):
+	def merge_partitions(self, partition_dim=None, num_partitions=None, copy_obj=True):
 		""" Merges partitions into partitions of larger dim, using the existing partitions
 		ARGS:
 			partition_dim/num_partitions : specs to make new partitinos
+				- exactly one of these should be None
+				- the other one should be eithr an int, or a dict with the same keys
+				  as self.base_zonotopes
 			copy_obj: bool - if True, we leave this object unchanged and compute a new object
 							 otherwise, we just modify this object
 
-			ONLY IDX IS KINDA BROKEN, BUT WORKS A LITTLE. BE WARY!
+
 		RETURNS:
 			a PartitionObject
 		"""
 		# Merges partitions into smaller partitions using existing partitions
 		# If copy is True, we create a separate partition object and leave this state
 
-		passes_idx_check = lambda i: (only_idx is None) or (only_idx == i) # True for the idx we update
+		#
 
+		assert sum([(partition_dim is None), (num_partitions is None)]) == 1
+
+		# Compute new groups
+		new_groups = {}
 		if self.style == 'fixed_dim':
 			assert partition_dim is not None
-			ratio = math.floor(partition_dim / self.partition_dim)
-		elif self.style == 'fixed_part':
+			for idx, group in self.groups.items():
+				current_groupsize = max(len(_) for _ in group)
+				if isinstance(partition_dim, int):
+					new_groupsize = partition_dim
+				elif isinstance(partition_dim, dict):
+					new_groupsize = partition_dim[idx]
+				else:
+					raise NotImplementedError()
+
+				if new_groupsize == current_groupsize:
+					new_groups[idx] = group
+				else:
+					ratio = math.floor(new_groupsize / current_groupsize)
+
+					new_groups[idx] = [utils.flatten(group[i: i+ratio])
+									   for i in range(0, len(group), ratio)]
+		if self.style == 'fixed_part':
 			assert num_partitions is not None
-			ratio = math.floor(num_partitions / self.num_partitions)
-		else:
-			raise NotImplementedError()
+			for idx, group in self.groups.items():
+				current_numgroups = len(group)
+				if isinstance(num_partitions, int):
+					new_numgroups = num_partitions
+				elif isinstance(num_partitions, dict):
+					new_numgroups = num_partitions[idx]
+				else:
+					raise NotImplementedError()
+
+				if new_numgroups == current_numgroups:
+					new_groups[idx] = group
+				else:
+					ratio = math.floor(current_numgroups / new_numgroups)
+					new_groups[i] = [utils.flatten(group[i:i+ratio])
+									 for i in range(0, len(group), ratio)]
+
+
 		new_partition_dim = partition_dim
 		new_num_partitions = num_partitions
 
-		# No need to merge if not saving groups anyway
+		# Now modify the vertices
 		new_vertices = {}
-		for i, vlist in list(self.vertices.items()):
-			if not passes_idx_check(i):
-				new_vertices[i] = vlist
-				continue
-			del self.vertices[i]
+		for idx, group in new_groups.items():
+			if group == self.groups[idx] and self.vertices.get(idx) is not None:
+				new_vertices[idx] = self.vertices[idx]
 
-		new_vertices = {} # uncache vertices, regardless
-		if self.save_partitions is False:
-			return {}
 
-		# Figure out how to merge groups:...
-		new_groups = {}
-		for i, group in self.groups.items():
-			if not passes_idx_check(i):
-				new_groups[i] = group
-				continue
-			new_groups[i] = [utils.flatten(group[i:i+ratio])
-						  	 for i in range(0, len(group), ratio)]
-
+		# Now make the new zonos (and setup MIPs)
 		new_subzonos = {}
 		if self.save_partitions:
 			if self.save_models:
-				for i, groups in new_groups.items():
-					if not passes_idx_check(i):
-						new_subzonos[i] = self.subzonos.get(i)
+				for idx, group in new_groups.items():
+					if max(len(_) for _ in group) <= 2: # only build MIP models if groupsize > 2
 						continue
-					zono = self.base_zonotopes[i]
-					subzonos = self.order_sweep([_[1] for _ in zono.partition(groups)])
+					zono = self.base_zonotopes[idx]
+					if group == self.groups[idx]:
+						new_subzonos[idx] = self.subzonos.get(idx) # No change to subzonos if no change to groups
+						continue
 
-					box_bounds = None
-					for subgroup, subzono in zip(groups, subzonos):
+
+					subzonos = self.order_sweep([_[1] for _ in zono.partition(group)])
+					for subgroup, subzono in zip(group, subzonos):
 						box_bounds = None
 						if self.box_info is not None:
-							box_bounds = self.box_info[i][subgroup]
+							box_bounds = self.box_info[idx][subgroup]
 						subzono._setup_relu_mip2(box_bounds=box_bounds)
-
-					new_subzonos[i] = subzonos
+					new_subzonos[idx] = subzonos
 
 		if copy_obj:
 			new_obj = PartitionGroup(None, style=self.style,
 									 partition_rule=self.partition_rule,
 									 save_partitions=self.save_partitions,
-									 save_models=self.save_models,
-									 num_partitions=new_num_partitions,
-									 partition_dim=new_partition_dim,
-							         max_order=self.max_order,
-							         force_mip=self.force_mip,
-							         cache_vertices=self.cache_vertices,
-							         use_crossings=self.use_crossings,
-							         box_info=self.box_info
-							         )
+									 num_partitions=num_partitions,
+									 partition_dim=partition_dim,
+									 max_order=self.max_order,
+									 force_mip=self.force_mip,
+									 cache_vertices=self.cache_vertices,
+									 use_crossings=self.use_crossings,
+									 box_info=self.box_info)
 			new_obj.vertices = new_vertices
 			new_obj.base_zonotopes = self.base_zonotopes
 			new_obj.groups = new_groups
 			new_obj.subzonos = new_subzonos
 			return new_obj
 		else:
-			self.partition_dim = new_partition_dim
+			self.partition_dim = partition_dim
 			self.num_partitions = new_num_partitions
 			self.vertices = new_vertices
 			self.groups = new_groups

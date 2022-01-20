@@ -227,6 +227,9 @@ class Zonotope(AbstractDomain):
         new_generator = self.generator.__getitem__(items)
         return Zonotope(new_center, new_generator, max_order=self.max_order)
 
+    def __repr__(self):
+        return "Zonotope(%s,%s)" % (self.dim, self.gensize)
+
 
     @classmethod
     def merge_partitions(cls, partitions, num_groups=1):
