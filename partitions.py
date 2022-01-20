@@ -6,6 +6,7 @@ import random
 import utilities as utils
 import torch.nn as nn
 import math
+import joblib
 
 class PartitionGroup():
 
@@ -13,7 +14,8 @@ class PartitionGroup():
 				 partition_rule='random', save_partitions=True,
 				 save_models=True, num_partitions=None, partition_dim=None,
 				 max_order=None, force_mip=False, cache_vertices=True,
-				 use_crossings=True, input_shapes=None, box_info=None):
+				 use_crossings=True, input_shapes=None, box_info=None,
+				 num_threads=None):
 		""" Parameters for partitioning.
 		Two basic styles for partitioning:
 			- fixed number of partitions per zonotope  (fixed_part)
@@ -57,6 +59,7 @@ class PartitionGroup():
 		self.vertices = {}
 		self.box_info = box_info
 		self.input_shapes = input_shapes
+		self.num_threads = num_threads
 
 		if self.base_zonotopes is not None:
 			self.make_all_partitions() # modifies state if save_partitions=True
@@ -194,16 +197,30 @@ class PartitionGroup():
 
 		obj_val = 0.0
 		argmin = torch.zeros_like(zono.center)
-		for group, subzono in zip(groups, parts):
+
+
+		#### MULTITHREADING BLOCK
+		def subproblem(group, subzono):
 			box_bounds = None if ((self.box_info or {}).get(i) is None) else self.box_info[i][group]
 			min_val, sub_argmin, _, _ = subzono.solve_relu_mip(c1[group], c2[group], apx_params=gurobi_params,
 				                                               start=start, box_bounds=box_bounds)
-			obj_val += min_val
+			return min_val, sub_argmin, group
 
+
+		if self.num_threads is None:
+			thread_outs = [subproblem(group, subzono) for (group, subzono) in zip(groups, parts)]
+		else:
+			thread_outs = joblib.Parallel(n_jobs=self.num_threads)(subproblem(group, subzono) for (group, subzono) in zip(groups, parts))
+		#####
+
+		# Resolve thread outs
+		obj_val = 0
+		for min_val, sub_argmin, group in thread_outs:
+			obj_val += min_val
 			sub_argmin = torch.tensor(sub_argmin).type(argmin.dtype).to(argmin.device).flatten()
 			argmin[group] = sub_argmin
-
 		return obj_val, argmin
+
 
 
 	def merge_partitions(self, partition_dim=None, num_partitions=None, copy_obj=True):

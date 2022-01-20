@@ -15,6 +15,8 @@ from neural_nets import FFNet, PreactBounds, KWBounds, BoxInformedZonos
 from abstract_domains import Hyperbox, Zonotope
 import utilities as utils
 from partitions import PartitionGroup
+from decomposition_plnn_bounds.plnn_bounds.proxlp_solver.solver import SaddleLP
+
 
 
 class DecompDual2:
@@ -36,19 +38,52 @@ class DecompDual2:
         self.mip_start = mip_start
         self.num_ub_iters = num_ub_iters
         # Initialize duals
+
         self.rhos = self.init_duals(zero_dual)
 
     # ==============================================================================
     # =           Helper methods                                                   =
     # ==============================================================================
-
     def init_duals(self, zero_dual):
+        if zero_dual:
+            return self._zero_duals()
+        else:
+            return self._kw_init_duals()
+
+    def _zero_duals(self):
+
+
         rhos = OrderedDict()
         for idx, layer in enumerate(self.network):
             if isinstance(layer, nn.ReLU):
 
                 rhos[idx] = nn.Parameter(torch.zeros_like(self.preact_bounds[idx].lbs))
         return rhos
+
+    def _kw_init_duals(self):
+        # Stealing this code because I'm lazy
+        rhos = OrderedDict()
+        domain = torch.stack([self.input_domain.lbs.view(self.network[0].input_shape),
+                              self.input_domain.ubs.view(self.network[0].input_shape)], dim=-1)
+        coeffs_idx = len([_ for _ in self.network if isinstance(_, nn.ReLU)]) + 1
+        coeffs = {coeffs_idx: torch.Tensor([[-1.0]]).to(self.network[0].weight.device)}
+        intermed_net = SaddleLP([lay for lay in utils.add_flattens(self.network)])
+        intermed_net.set_solution_optimizer('init', None)
+        intermed_net.define_linear_approximation(domain, force_optim=True, no_conv=False,
+                                                         override_numerical_errors=True)
+
+        intermed_net.set_initialisation('KW')
+        kw_rhos = intermed_net.decomposition.initial_dual_solution(intermed_net.weights, coeffs,
+                                            intermed_net.lower_bounds, intermed_net.upper_bounds).rhos
+
+
+        running_idx = 0
+        for idx, layer in enumerate(self.network):
+            if isinstance(layer, nn.ReLU):
+                rhos[idx] = nn.Parameter(kw_rhos[running_idx].flatten().data)
+                running_idx += 1
+        return rhos
+
 
     def parameters(self):
         return iter(self.rhos.values())

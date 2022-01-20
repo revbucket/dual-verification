@@ -852,7 +852,6 @@ class Zonotope(AbstractDomain):
         try:
             model.setObjective(lin_obj @ xs + relu_obj @ relu_vars, gb.GRB.MINIMIZE)
         except Exception as err:
-            raise err
             # In the case that |unc_idxs| == 1
             model.setObjective(lin_obj @ xs + relu_obj * relu_vars, gb.GRB.MINIMIZE)
 
