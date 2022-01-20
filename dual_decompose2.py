@@ -289,6 +289,8 @@ class DecompDual2:
         base_zonotopes = {i: self.preact_bounds[i] for i, bound in enumerate(self.preact_bounds)
                           if i not in self.network.linear_idxs}
 
+        input_shapes = [l.input_shape for l in self.network.net]
+
         if self.partition is None:
             box_info = None
             if isinstance(self.preact_bounds, BoxInformedZonos):
@@ -296,7 +298,7 @@ class DecompDual2:
 
             partition = PartitionGroup(base_zonotopes, style='fixed_dim', partition_rule='random',
                                        save_partitions=True, save_models=False, partition_dim=2,
-                                       use_crossings=True, box_info=box_info)
+                                       use_crossings=True, box_info=box_info, input_shapes=input_shapes)
             self.partition = partition
 
         if self.partition.base_zonotopes is None:
