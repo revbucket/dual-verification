@@ -13,7 +13,7 @@ class PartitionGroup():
 				 partition_rule='random', save_partitions=True,
 				 save_models=True, num_partitions=None, partition_dim=None,
 				 max_order=None, force_mip=False, cache_vertices=True,
-				 use_crossings=True):
+				 use_crossings=True, box_info=None):
 		""" Parameters for partitioning.
 		Two basic styles for partitioning:
 			- fixed number of partitions per zonotope  (fixed_part)
@@ -32,6 +32,7 @@ class PartitionGroup():
 			force_mip: if True, we use MIP even in partitions of dimension 2
 			cache_vertices: if True, and 2d, we save the vertices
 			use_crossings: if True, we consider the coordinate-axes crossing objects in 2d zonos
+			box_info: if True, we have extra boxes that we know to add in the mip
 		"""
 		# Assertion checks
 		assert style in ['fixed_dim', 'fixed_part']
@@ -54,6 +55,7 @@ class PartitionGroup():
 		self.cache_vertices = cache_vertices
 		self.use_crossings = use_crossings
 		self.vertices = {}
+		self.box_info = box_info
 
 		if self.base_zonotopes is not None:
 			self.make_all_partitions() # modifies state if save_partitions=True
@@ -170,8 +172,9 @@ class PartitionGroup():
 		obj_val = 0.0
 		argmin = torch.zeros_like(zono.center)
 		for group, subzono in zip(groups, parts):
+			box_bounds = None if ((self.box_info or {}).get(i) is None) else self.box_info[i][group]
 			min_val, sub_argmin, _, _ = subzono.solve_relu_mip(c1[group], c2[group], apx_params=gurobi_params,
-				                                               start=start)
+				                                               start=start, box_bounds=box_bounds)
 			obj_val += min_val
 
 			sub_argmin = torch.tensor(sub_argmin).type(argmin.dtype).to(argmin.device).flatten()
@@ -180,18 +183,21 @@ class PartitionGroup():
 		return obj_val, argmin
 
 
-	def merge_partitions(self, partition_dim=None, num_partitions=None, copy_obj=True):
+	def merge_partitions(self, partition_dim=None, num_partitions=None, copy_obj=True, only_idx=None):
 		""" Merges partitions into partitions of larger dim, using the existing partitions
 		ARGS:
 			partition_dim/num_partitions : specs to make new partitinos
 			copy_obj: bool - if True, we leave this object unchanged and compute a new object
 							 otherwise, we just modify this object
+
+			ONLY IDX IS KINDA BROKEN, BUT WORKS A LITTLE. BE WARY!
 		RETURNS:
 			a PartitionObject
 		"""
 		# Merges partitions into smaller partitions using existing partitions
 		# If copy is True, we create a separate partition object and leave this state
 
+		passes_idx_check = lambda i: (only_idx is None) or (only_idx == i) # True for the idx we update
 
 		if self.style == 'fixed_dim':
 			assert partition_dim is not None
@@ -205,6 +211,13 @@ class PartitionGroup():
 		new_num_partitions = num_partitions
 
 		# No need to merge if not saving groups anyway
+		new_vertices = {}
+		for i, vlist in list(self.vertices.items()):
+			if not passes_idx_check(i):
+				new_vertices[i] = vlist
+				continue
+			del self.vertices[i]
+
 		new_vertices = {} # uncache vertices, regardless
 		if self.save_partitions is False:
 			return {}
@@ -212,16 +225,29 @@ class PartitionGroup():
 		# Figure out how to merge groups:...
 		new_groups = {}
 		for i, group in self.groups.items():
+			if not passes_idx_check(i):
+				new_groups[i] = group
+				continue
 			new_groups[i] = [utils.flatten(group[i:i+ratio])
 						  	 for i in range(0, len(group), ratio)]
 
 		new_subzonos = {}
 		if self.save_partitions:
 			if self.save_models:
-				for i, group in new_groups.items():
+				for i, groups in new_groups.items():
+					if not passes_idx_check(i):
+						new_subzonos[i] = self.subzonos.get(i)
+						continue
 					zono = self.base_zonotopes[i]
-					subzonos = self.order_sweep([_[1] for _ in zono.partition(group)])
-					[_._setup_relu_mip2() for _ in subzonos]
+					subzonos = self.order_sweep([_[1] for _ in zono.partition(groups)])
+
+					box_bounds = None
+					for subgroup, subzono in zip(groups, subzonos):
+						box_bounds = None
+						if self.box_info is not None:
+							box_bounds = self.box_info[i][subgroup]
+						subzono._setup_relu_mip2(box_bounds=box_bounds)
+
 					new_subzonos[i] = subzonos
 
 		if copy_obj:
@@ -235,6 +261,7 @@ class PartitionGroup():
 							         force_mip=self.force_mip,
 							         cache_vertices=self.cache_vertices,
 							         use_crossings=self.use_crossings,
+							         box_info=self.box_info
 							         )
 			new_obj.vertices = new_vertices
 			new_obj.base_zonotopes = self.base_zonotopes
@@ -247,6 +274,7 @@ class PartitionGroup():
 			self.vertices = new_vertices
 			self.groups = new_groups
 			self.subzonos = new_subzonos
+			self.box_info = box_info
 			return self
 
 

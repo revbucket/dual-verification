@@ -38,6 +38,7 @@ class Hyperbox(AbstractDomain):
         self.ubs = ubs
         self.center = (self.lbs + self.ubs) / 2.0
         self.rad = self.ubs - self.center
+        self.dim = self.lbs.numel()
 
     def cuda(self):
         self.lbs = self.lbs.cuda()
@@ -56,8 +57,10 @@ class Hyperbox(AbstractDomain):
     def twocol(self):
         return torch.stack([self.lbs, self.ubs]).T
 
-    def dim(self):
-        return self.lbs.numel()
+    def __getitem__(self, items):
+        new_lbs = self.lbs.__getitem__(items)
+        new_ubs = self.ubs.__getitem__(items)
+        return Hyperbox(new_lbs, new_ubs)
 
     @classmethod
     def linf_box(cls, center, rad):
@@ -219,6 +222,12 @@ class Zonotope(AbstractDomain):
     def __call__(self, y):
         return self.center + self.generator @ y
 
+    def __getitem__(self, items):
+        new_center = self.center.__getitem__(items)
+        new_generator = self.generator.__getitem__(items)
+        return Zonotope(new_center, new_generator, max_order=self.max_order)
+
+
     @classmethod
     def merge_partitions(cls, partitions, num_groups=1):
         """ Merges partitions into a single zonotope
@@ -276,7 +285,7 @@ class Zonotope(AbstractDomain):
     def twocol(self):
         return torch.stack([self.lbs, self.ubs]).T
 
-    def solve_lp(self, obj: torch.Tensor, bias=0.0, get_argmin: bool = False):
+    def solve_lp(self, obj: torch.Tensor, get_argmin: bool = False, bias=0.0):
         # RETURNS: either optimal_value or (optimal_value, optimal point)
         center_val = self.center @ obj
         opt_signs = -torch.sign(self.generator.T @ obj)
@@ -602,17 +611,28 @@ class Zonotope(AbstractDomain):
         return Zonotope(new_center, new_generator, max_order=self.max_order)
 
 
-    def map_relu(self):
+    def map_relu(self, extra_box=None):
         """ Remember how to do this...
             Want to minimize the vertical deviation on
             |lambda * (c + Ey) - ReLU(c+Ey)| across c+Ey in [l, u]
+
+            if extra_box is not None, is a hyperbox with extra bounds we know to be valid
         """
         #### SOME SORT OF BUG HERE --- NOT PASSING SANITY CHECKS
         new_center = torch.clone(self.center)
         new_generator = torch.clone(self.generator)
 
-        on_neurons = self.lbs > 0
-        off_neurons = self.ubs < 0
+        if extra_box is None:
+            lbs = self.lbs
+            ubs = self.ubs
+        else:
+            lbs = torch.max(torch.stack([self.lbs, extra_box.lbs]), dim=0)[0]
+            ubs = torch.min(torch.stack([self.ubs, extra_box.ubs]), dim=0)[0]
+
+
+
+        on_neurons = lbs > 0
+        off_neurons = ubs < 0
         unstable = ~(on_neurons + off_neurons)
         # For all 'on' neurons, nothing needs doing
         # For all 'off' neurons, set to zero
@@ -624,14 +644,14 @@ class Zonotope(AbstractDomain):
         # 2) multiple current center by u/u-l
         # 3) add -ul/2*(u-l) to current center
         # 4) add new column vec to generator with -ul/2*(u-l) to matrix
-        scale = self.ubs[unstable] / (self.ubs[unstable] - self.lbs[unstable])
-        offset = -self.lbs[unstable] * scale / 2.0
+        scale = ubs[unstable] / (ubs[unstable] - lbs[unstable])
+        offset = -lbs[unstable] * scale / 2.0
 
         new_generator[unstable] *= scale.view(-1, 1) # 1
         new_center[unstable] *= scale                # 2
         new_center[unstable] += offset               # 3
 
-        new_cols = torch.zeros_like(self.lbs.view(-1, 1).expand(-1, unstable.sum())) # 4
+        new_cols = torch.zeros_like(lbs.view(-1, 1).expand(-1, unstable.sum())) # 4
         new_cols[unstable] = torch.diag(offset)
 
 
@@ -690,13 +710,22 @@ class Zonotope(AbstractDomain):
                 'xs': xs,
                 'ys': ys}
 
-    def _encode_mip2(self):
+    def _encode_mip2(self, box_bounds=None):
         eps =1e-6
         model = gb.Model()
         ys = model.addMVar(self.gensize, lb=-1, ub=1, name='y')
         model.update()
 
-        xs = model.addMVar(self.dim, lb=self.lbs -eps, ub=self.ubs + eps, name='x')
+        if box_bounds is None:
+            lbs = self.lbs
+            ubs = self.ubs
+        else:
+            lbs = torch.max(self.lbs, box_bounds.lbs)
+            ubs = torch.min(self.ubs, box_bounds.ubs)
+
+        xs = model.addMVar(self.dim, lb=lbs - eps, ub=ubs + eps, name='x')
+
+
         model.addConstr(self.generator.cpu().numpy() @ ys + self.center.cpu().numpy() == xs)
         model.update()
         return {'model': model,
@@ -751,7 +780,7 @@ class Zonotope(AbstractDomain):
 
         return model, xs, ys, all_relu_vars
 
-    def _setup_relu_mip2(self):
+    def _setup_relu_mip2(self, box_bounds=None):
         """ Sets up the optimization program:
             min c1*z + c2*Relu(z) over this zonotope
 
@@ -760,7 +789,7 @@ class Zonotope(AbstractDomain):
         Returns
             (opt_val, argmin x, argmin y)
         """
-        mip_dict = self._encode_mip2()
+        mip_dict = self._encode_mip2(box_bounds=box_bounds)
         model = mip_dict['model']
 
 
@@ -791,20 +820,22 @@ class Zonotope(AbstractDomain):
         return model, xs, ys, relu_vars, unc_idxs
 
 
-    def solve_relu_mip(self, c1, c2, apx_params=None, verbose=False, start=None, start_kwargs={}):
+    def solve_relu_mip(self, c1, c2, apx_params=None, verbose=False, start=None, start_kwargs={},
+                       box_bounds=None):
         # Setup the model (or load it if saved)
         if self.keep_mip:
             if self.relu_prog_model is None:
-                self.relu_prog_model = self._setup_relu_mip2()
+                self.relu_prog_model = self._setup_relu_mip2(box_bounds)
             model, xs, ys, relu_vars, unc_idxs = self.relu_prog_model
         else:
-            model, xs, ys, relu_vars, unc_idxs = self._setup_relu_mip2()
+            model, xs, ys, relu_vars, unc_idxs = self._setup_relu_mip2(box_bounds)
 
-        if verbose is False:
-            model.setParam('OutputFlag', False)
+
 
         # Encode the parameters
-        for k,v in (apx_params or {}).items():
+        apx_params = apx_params if (apx_params is not None) else {}
+        apx_params['OutputFlag'] = verbose
+        for k,v in apx_params.items():
             model.setParam(k, v)
 
         # Set the objective and optimize

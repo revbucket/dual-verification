@@ -11,7 +11,7 @@ import torch.optim as optim
 import time
 from typing import List
 from collections import OrderedDict
-from neural_nets import FFNet, PreactBounds
+from neural_nets import FFNet, PreactBounds, KWBounds, BoxInformedZonos
 from abstract_domains import Hyperbox, Zonotope
 import utilities as utils
 from partitions import PartitionGroup
@@ -107,7 +107,7 @@ class DecompDual2:
         # Compute lagrangian with argmins here
         total = {}
         rhos = self.rhos if (rhos is None) else rhos
-        primals = self.get_primals(rhos=rhos)[1]
+        primals = primals if (primals is not None) else self.get_primals(rhos=rhos)[1]
 
         for idx, layer in enumerate(self.network):
             if not isinstance(layer, nn.ReLU):
@@ -288,10 +288,15 @@ class DecompDual2:
         # Use this method to access partition object.
         base_zonotopes = {i: self.preact_bounds[i] for i, bound in enumerate(self.preact_bounds)
                           if i not in self.network.linear_idxs}
+
         if self.partition is None:
+            box_info = None
+            if isinstance(self.preact_bounds, BoxInformedZonos):
+                box_info = {(2 *i - 1): box for i, box in enumerate(self.preact_bounds.box_range[1:], start=1)}
+
             partition = PartitionGroup(base_zonotopes, style='fixed_dim', partition_rule='random',
                                        save_partitions=True, save_models=False, partition_dim=2,
-                                       use_crossings=True)
+                                       use_crossings=True, box_info=box_info)
             self.partition = partition
 
         if self.partition.base_zonotopes is None:
@@ -299,11 +304,13 @@ class DecompDual2:
         return self.partition
 
 
-    def merge_partitions(self, partition_dim=None, num_partitions=None, copy_obj=True):
+    def merge_partitions(self, partition_dim=None, num_partitions=None, copy_obj=True,
+                         only_idx=None):
         self.partition.save_models = True # Generally want to do this to save time later
         self.partition = self.gather_partitions().merge_partitions(partition_dim=partition_dim,
                                                                    num_partitions=num_partitions,
-                                                                   copy_obj=copy_obj)
+                                                                   copy_obj=copy_obj,
+                                                                   only_idx=only_idx)
 
 
 

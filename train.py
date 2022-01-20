@@ -111,7 +111,7 @@ def training_loop(network, train_params):
             els = []
             if 'l1' in wr:
                 l1_norm = sum(p.abs().sum() for p in model.parameters())
-                els.apppend(wr['l1'] * l1_norm)
+                els.append(wr['l1'] * l1_norm)
             if 'l2' in wr:
                 l2_norm = sum(p.pow(2.0).sum() for p in model.parameters())
                 els.append(wr['l2'] * l2_norm)

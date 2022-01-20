@@ -1,5 +1,6 @@
 """ Utilities that are useful in general """
 import torch
+import torch.nn as nn
 import matplotlib.pyplot as plt
 import random
 import math
@@ -29,6 +30,25 @@ def no_grad(f):
 # ========================================================
 # =           Other helpful methods                      =
 # ========================================================
+
+
+def add_flattens(network):
+    """ Given an iterable of layers, builds a nn.Sequential with
+        flattens inserted between each conv and linear layer
+    """
+    new_network = [network[0]]
+    netlist = [layer for layer in network]
+    last_affine = network[0]
+    for i in range(1, len(netlist)):
+        layer = netlist[i]
+        if isinstance(layer, nn.Linear) and isinstance(last_affine, nn.Conv2d):
+            new_network.append(nn.Flatten())
+        new_network.append(layer)
+
+        if isinstance(layer, (nn.Linear, nn.Conv2d)):
+            last_affine = layer
+    return nn.Sequential(*netlist)
+
 
 def tensorfy(x):
     if isinstance(x, torch.Tensor):

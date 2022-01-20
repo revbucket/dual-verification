@@ -226,6 +226,78 @@ class KWBounds(PreactBounds):
         return self
 
 
+class BoxInformedZonos(PreactBounds):
+    """ Custom technique when the zonos are informed using tighter boxes """
+    def __init__(self, network: FFNet, input_range: Hyperbox, box_range=None):
+        super(BoxInformedZonos, self).__init__(network, input_range, Zonotope)
+        self.box_range = box_range # Outputs from Alessandro's method when opt_all=True
+
+    def compute(self):
+
+        if self.box_range is None:
+            self.box_range = self._compute_boxes()
+
+        input_shape = self.network[0].input_shape
+        bounds = [self.input_range.as_zonotope()]
+
+        running_idx = 0
+        for layer in self.network:
+            prev_layer = bounds[-1]
+            if isinstance(layer, nn.ReLU):
+                bounds.append(prev_layer.map_relu(extra_box=self.box_range[running_idx]))
+
+            elif isinstance(layer, (nn.Linear, nn.Conv2d)):
+                bounds.append(prev_layer.map_layer(layer))
+                running_idx += 1
+            else:
+                raise NotImplementedError()
+
+        self.bounds = bounds
+        self.computed = True
+        return self
+
+
+    def _compute_boxes(self):
+        """ Computes the lower/upper bounds for as hyperboxes using optprox """
+
+        domain = torch.stack([self.input_range.lbs.view(self.network[0].input_shape),
+                              self.input_range.ubs.view(self.network[0].input_shape)], dim=-1)
+
+        intermediate_net = SaddleLP([lay for lay in utils.add_flattens(self.network)])
+
+        with torch.no_grad():
+            intermediate_net.set_solution_optimizer('best_naive_kw', None)
+            intermediate_net.define_linear_approximation(domain, force_optim=True, no_conv=False,
+                                                         override_numerical_errors=True)
+        intermediate_ubs = intermediate_net.upper_bounds
+        intermediate_lbs = intermediate_net.lower_bounds
+
+        optprox_params = {
+                    'nb_total_steps': 400,
+                    'max_nb_inner_steps': 2,  # this is 2/5 as simpleprox
+                    'initial_eta': 1e1,
+                    'final_eta': 5e2,
+                    'log_values': False,
+                    'inner_cutoff': 0,
+                    'maintain_primal': True,
+                    'acceleration_dict': {
+                        'momentum': 0.3,  # to avoid momentum, set this to 0
+                    }
+                }
+        prox_net = SaddleLP([lay for lay in utils.add_flattens(self.network)])
+
+        prox_net.set_initialisation('KW')
+        prox_net.set_solution_optimizer('optimized_prox', optprox_params)
+
+        prox_net.define_linear_approximation(domain, force_optim=True, no_conv=False)
+        all_boxes = [Hyperbox(prox_net.lower_bounds[i], prox_net.upper_bounds[i])
+                     for i in range(len(prox_net.lower_bounds))]
+
+        return all_boxes
+
+
+
+
 class CROWN(PreactBounds):
     def __init__(self, network: FFNet, input_range: Hyperbox):
         raise NotImplementedError("This is broken I think")
