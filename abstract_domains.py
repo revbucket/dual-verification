@@ -456,7 +456,7 @@ class Zonotope(AbstractDomain):
         best_o, best_y = float('inf'), None
 
         for _ in range(iters):
-            y = 2 * (torch.rand(self.generator.shape[1]) > 0.5).float() - 1
+            y = 2 * (torch.rand_like(self.generator[0]) > 0.5).float() - 1
             z = self(y)
             o = c1 @ z + c2 @ F.relu(z)
             G, b = self.generator, self.center
@@ -729,7 +729,7 @@ class Zonotope(AbstractDomain):
         xs = model.addMVar(self.dim, lb=lbs - eps, ub=ubs + eps, name='x')
 
 
-        model.addConstr(self.generator.cpu().numpy() @ ys + self.center.cpu().numpy() == xs)
+        model.addConstr(self.generator.detach().cpu().numpy() @ ys + self.center.cpu().numpy() == xs)
         model.update()
         return {'model': model,
                 'xs': xs,

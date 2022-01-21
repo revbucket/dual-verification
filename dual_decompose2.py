@@ -356,6 +356,7 @@ class DecompDual2:
         assert isinstance(bounds, Zonotope)
         c1, c2 = self._get_coeffs(idx, rhos=rhos)
 
+
         opt_val, x = self.gather_partitions().relu_program(idx, c1, c2,
                                                            gurobi_params=self.primal_mip_kwargs,
                                                            start=self.mip_start)
@@ -376,7 +377,13 @@ class DecompDual2:
         bounds = self.preact_bounds[idx]
         assert isinstance(bounds, Zonotope)
         c1, c2 = self._get_coeffs(idx, rhos=rhos)
-        opt_val, x = self.gather_partitions().relu_program_simplex(idx, c1, c2)
+        # HACK: write the right answer for 2d partitions
+        partition = self.gather_partitions()
+        if partition.partition_dim == 2 or (isinstance(partition.partition_dim, dict) and partition.partition_dim[idx] == 2):
+            opt_val, x = partition.relu_program(idx, c1, c2, gurobi_params=self.primal_mip_kwargs,
+                                          start=self.mip_start)
+        else:
+            opt_val, x = partition.relu_program_simplex(idx, c1, c2)
         return opt_val, x.data, self._next_layer_relu_out(idx, x.data)
 
 

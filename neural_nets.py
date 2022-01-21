@@ -290,7 +290,7 @@ class BoxInformedZonos(PreactBounds):
         prox_net.set_solution_optimizer('optimized_prox', optprox_params)
 
         prox_net.define_linear_approximation(domain, force_optim=True, no_conv=False)
-        all_boxes = [Hyperbox(prox_net.lower_bounds[i], prox_net.upper_bounds[i])
+        all_boxes = [Hyperbox(prox_net.lower_bounds[i].flatten(), prox_net.upper_bounds[i].flatten())
                      for i in range(len(prox_net.lower_bounds))]
 
         return all_boxes
