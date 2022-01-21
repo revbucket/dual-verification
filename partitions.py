@@ -7,6 +7,7 @@ import utilities as utils
 import torch.nn as nn
 import math
 import joblib
+import numpy as np
 
 class PartitionGroup():
 
@@ -78,6 +79,22 @@ class PartitionGroup():
 			outzono_list.append(zono)
 		return outzono_list
 
+	def _access_ith_partition_dim(self, i):
+		if self.partition_dim is None:
+			return None
+		if isinstance(self.partition_dim, int):
+			return self.partition_dim
+		if isinstance(self.partition_dim, dict):
+			return self.partition_dim[i]
+
+	def _access_ith_num_partitions(self, i):
+		if self.num_partitions is None:
+			return None
+		if isinstance(self.num_partitions, int):
+			return self.num_partitions
+		if isinstance(self.num_partitions, dict):
+			return self.num_partitions[i]
+
 
 	def make_all_partitions(self, **kwargs):
 		""" Generates the partitions as list of partitions,
@@ -106,7 +123,7 @@ class PartitionGroup():
 			groups = utils.partition(list(range(zono.dim)), num_parts)
 
 		elif self.partition_rule in ("depthwise", "spatial"):
-			import numpy as np
+
 			if i >= len(self.input_shapes) or len(self.input_shapes[i]) != 3:
 				groups = utils.partition(list(range(zono.dim)), num_parts)
 			else:
@@ -121,6 +138,19 @@ class PartitionGroup():
 				)
 				part_dim = zono.dim // num_parts
 				groups = [indexes[i: i+part_dim] for i in range(0, zono.dim, part_dim)]
+
+		elif self.partition_rule == 'similarity':
+			if self._access_ith_partition_dim(i) == 2:
+				groups = self._make_similarity_groups(i)
+			else:
+				groups = utils.partition(list(range(zono.dim)), num_parts)
+		elif self.partition_rule == 'axalign':
+			if self._access_ith_partition_dim(i) == 2:
+				groups = self._make_axalign_groups(i)
+			else:
+				groups = utils.partition(list(range(zono.dim)), num_parts)
+
+
 
 		else:
 			# if scored, then kwargs['score_fxn'] is a list of fxns (zono, idx)->score
@@ -140,6 +170,104 @@ class PartitionGroup():
 			return groups
 		else:
 			return groups
+
+
+	def _make_similarity_groups(self, idx):
+		""" Makes groups based on 'similarity' of generator rows.
+
+		Discussion:
+			Idea: we do better when the zonotopes aren't square-like:
+				The right answer is to compute the volume of each zono vs the box version
+				(volume of a 2d zono is O(gensize^2), so not pratical to do for all O(n^2) possible 2d zonos)
+				The heuristic answer is to measure similarity of dot products of abs of genrows
+			Heuristic:
+			- considers similarity of generator rows as the dot products of row.abs()'s
+			- sorts each row according to the most similar row
+			- considers highest-similarity rows first, and then creates list of pairs
+		"""
+
+		zono = self.base_zonotopes[idx]
+		if zono.dim == 1:
+			return [[0]]
+
+		sim = zono.generator.abs() @ zono.generator.abs().T
+		sim.fill_diagonal_(-1)
+
+		# Each row has the index of the most sorted rows
+		sort_vals, sort_idxs = torch.sort(sim, dim=1, descending=True)
+		group_order = torch.sort(sort_vals[:,0], descending=True)[1]
+		return self._scored_pair_groups(sort_idxs, group_order)
+
+
+	def _make_axalign_groups(self, idx):
+		""" Leverages the 'axalign' heuristic for order reduction to pairs
+
+		for each candidate pair of dimensions:
+			- compute score for each (2d) generator, where score is
+			  l1_norm / linf_norm ,
+			- get total pair-candidate score by adding up scores over all generators
+		"""
+		zono = self.base_zonotopes[idx]
+		if zono.dim == 1:
+			return [[0]]
+
+
+		zono = self.base_zonotopes[idx]
+		dim = zono.dim
+		gen_abs = zono.generator.abs()
+
+
+		# Okay, dumb algorithm loops over generators but doesn't blow up the memory
+		sim = torch.zeros((zono.dim, zono.dim)).to(zono.center.device)
+		counts = torch.zeros((zono.dim, zono.dim)).to(zono.center.device)
+		for k in range(zono.gensize):
+			# add a matrix with (i,j) element being (gen(i,k) + gen(j,k)) / max(gen(i,k), gen(j,k)) to sim
+			topsum = gen_abs[:,k].view(1, -1) + gen_abs[:,k].view(-1, 1)
+
+			botmax = torch.max(gen_abs[:,k].view(1, -1).expand(zono.dim, zono.dim),
+							   gen_abs[:,k].view(-1, 1).expand(zono.dim, zono.dim))
+
+			quotient = topsum/botmax
+			quotient[quotient != quotient] = 0.0
+			counts.add_((botmax > 0).int())
+			sim.add_(quotient)
+
+		sim = sim / counts
+		sim[sim != sim] = 0.0
+		sim.fill_diagonal_(-1)
+
+		sort_vals, sort_idxs = torch.sort(sim, dim=1, descending=True)
+		group_order = torch.sort(sort_vals[:,0], descending=True)[1]
+		return self._scored_pair_groups(sort_idxs, group_order)
+
+
+
+
+	def _scored_pair_groups(self, sort_idxs, group_order):
+		""" Given a dxd matrix (sort idxs) where each row is a permutation of [d]
+			and a group_order that's a permutation of [d], creates a list
+			of pairs to maximize 'similarity'
+		"""
+		accounted_dims = set()
+		pairs = []
+		def get_pair(i):
+			for el in sort_idxs[i]: # loop over this row
+				el = int(el.item())
+				if i == el:
+					continue
+				if el not in accounted_dims:
+					return [i, el]
+
+
+		for i in group_order:
+			i = int(i.item())
+			if i in accounted_dims:
+				continue
+			new_pair = get_pair(i)
+			pairs.append(new_pair)
+			accounted_dims.add(new_pair[0])
+			accounted_dims.add(new_pair[1])
+		return pairs
 
 
 	def relu_program(self, i, c1, c2, gurobi_params=None, start=None, **kwargs):
@@ -250,12 +378,7 @@ class PartitionGroup():
 			assert partition_dim is not None
 			for idx, group in self.groups.items():
 				current_groupsize = max(len(_) for _ in group)
-				if isinstance(partition_dim, int):
-					new_groupsize = partition_dim
-				elif isinstance(partition_dim, dict):
-					new_groupsize = partition_dim[idx]
-				else:
-					raise NotImplementedError()
+				new_groupsize = self._access_ith_partition_dim(idx)
 
 				if new_groupsize == current_groupsize:
 					new_groups[idx] = group
@@ -268,12 +391,7 @@ class PartitionGroup():
 			assert num_partitions is not None
 			for idx, group in self.groups.items():
 				current_numgroups = len(group)
-				if isinstance(num_partitions, int):
-					new_numgroups = num_partitions
-				elif isinstance(num_partitions, dict):
-					new_numgroups = num_partitions[idx]
-				else:
-					raise NotImplementedError()
+				new_numgroups = self._access_ith_num_partitions(idx)
 
 				if new_numgroups == current_numgroups:
 					new_groups[idx] = group
