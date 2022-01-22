@@ -8,6 +8,7 @@ import torch.nn as nn
 import math
 import joblib
 import numpy as np
+from abstract_domains import Zonotope
 
 class PartitionGroup():
 
@@ -57,8 +58,21 @@ class PartitionGroup():
 		self.force_mip = force_mip
 		self.cache_vertices = cache_vertices
 		self.use_crossings = use_crossings
+
 		self.vertices = {}
+		# Coordinate-crossings for 2d vertices
+		self.crossings = {}
+		self.crossing_masks = {}
+
+		# --- box info stuff
 		self.box_info = box_info
+		self.vertex_masks = None
+		self.box_vertices = None
+		self.box_masks = None
+		self.box_zono_crossings = None
+		self.bxox_zono_masks = None
+
+
 		self.input_shapes = input_shapes
 		self.num_threads = num_threads
 
@@ -149,7 +163,6 @@ class PartitionGroup():
 				groups = self._make_axalign_groups(i)
 			else:
 				groups = utils.partition(list(range(zono.dim)), num_parts)
-
 
 
 		else:
@@ -293,28 +306,66 @@ class PartitionGroup():
 			groups = self.groups[i]
 
 
-		# Now handle the twoD case if we can
+		# ~~~~~~~~~~~~~~~~~~~~~~~New block~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 		if not self.force_mip and all(len(_) == 2 for _ in groups):
-			# group_vs = zono.batch_2d_partition(groups=groups)
-			# return zono.batch_2d_relu_program(c1, c2, groups=torch.tensor(groups))#, group_vs=group_vs)
 			groups = utils.tensorfy(groups).long().to(zono.center.device)
-			if not self.cache_vertices:
-				if self.use_crossings:
-					return zono.loop_zono_rp(c1, c2, groups=groups) # uses crossings by default
-				else:
-					return zono.batch_2d_relu_program(c1, c2, groups=groups)
-			else:
-				if self.vertices.get(i) is None:
-					if self.use_crossings:
-						self.vertices[i] = zono.loop_batch_zono_vs(groups=groups)
-					else:
-						self.vertices[i] = zono.batch_2d_partition(groups=groups)
-				#if self.use_crossings:
-				#	return zono.loop_zono_rp(c1, c2, groups=groups, loop_outs=self.vertices[i])
-				#else:
-				return zono.batch_2d_relu_program(c1, c2, groups=groups,
-													  group_vs=self.vertices[i])
+			if self.vertices.get(i) is None: # if haven't computed the vertices yet...
 
+				# Compute vertices and crossings
+				vertices = zono.batch_2d_partition(groups=groups)
+				crossings, crossing_masks = Zonotope.batch_2d_crossings(vertices)
+
+
+				# -------------  BOX INFO STUFF
+				if self.box_info is not None: # If box info exists...
+					# compute box related vertices
+					box = self.box_info[i]
+					crossing_masks, vertex_masks = zono.batch_zono_vertex_mask(groups, vertices, box,
+																			   crossings, crossing_masks)
+					box_vertices, box_masks = zono.batch_box_corners_axes(groups, vertices, box)
+					box_zono_crossings, box_zono_masks = zono.batch_zono_box_crossings(groups, vertices, box)
+				else: # otherwise
+					# Set these as None, so no errors
+					vertex_masks = None
+					box_vertices = box_masks = None
+					box_zono_crossings = box_zono_masks = None
+				# ----------------------------------------
+
+				if self.cache_vertices: # if we want to cache....
+					# Save everything
+					self.vertices[i] = vertices
+					self.crossings[i] = crossings
+					self.crossing_masks[i] = crossing_masks
+					self.vertex_masks = vertex_masks
+					self.box_vertices = box_vertices
+					self.box_masks = box_masks
+					self.box_zono_crossings = box_zono_crossings
+					self.box_zono_masks = box_zono_masks
+
+			else:
+				vertices = self.vertices[i]
+				crossings = self.crossings[i]
+				crossing_masks = self.crossing_masks[i]
+
+				vertex_masks = (self.vertex_masks or {}).get(i)
+				box_vertices = (self.box_vertices or {}).get(i)
+				box_masks = (self.box_masks or {}).get(i)
+				box_zono_crossings = (self.box_zono_crossings or {}).get(i)
+				box_zono_masks = (self.box_zono_masks or {}).get(i)
+
+
+
+			return zono.batch_2d_relu_program(c1, c2, groups=groups,
+											  group_vs=vertices,
+											  group_crossings=crossings,
+											  group_crossing_masks=crossing_masks,
+											  group_vertex_masks=vertex_masks,
+											  group_box_vertices=box_vertices,
+											  group_box_masks=box_masks,
+											  box_zono_crossings=box_zono_crossings,
+											  box_zono_masks=box_zono_masks)
+
+		# ~~~~~~~~~~~~~~~~~~~~~~~/New block~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 		# Otherwise make the partitions
 		if self.subzonos.get(i) is not None:

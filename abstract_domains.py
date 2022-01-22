@@ -931,8 +931,14 @@ class Zonotope(AbstractDomain):
     # =======================================================
     # =           2 Dimensional Partition blocks            =
     # =======================================================
-
+    '''
     def enumerate_vertices_2d(self, collect_crossings=True):
+        """ Collects the vertices of a 2d zonotope
+            OUTPUT is dict like
+            {vertices: (2*gensize, 2) -- zonotope vertices
+             crossings: (5, 2) -- points where zonotope crosses coordinate axes (or (0,0) where not exists,
+             crossing_mask: (5) -- bool tensor where TRUE means crossings[i] is contained in zono}
+        """
         # Returns (2*gensize, 2) tensor of vertices for this zono
         assert self.dim == 2
         signs = -torch.sign(self.generator[0])
@@ -947,13 +953,18 @@ class Zonotope(AbstractDomain):
         pos_vs = left_point.view(1, -1) + cumsum_gen.T
         neg_vs = 2 * self.center.view(1, -1) - pos_vs
 
-        vs = torch.cat([pos_vs, neg_vs])
+
+        output = {'vertices': torch.cat([pos_vs, neg_vs])}
+
+
         # Collecting coordinate-axes crossing points
         if collect_crossings is True:
-            crossings = self.all_cross_2d(vs)
-            if crossings is not None:
-                vs = torch.cat([vs, crossings])
-        return vs
+            crossings, crossing_mask = self.all_cross_2d(output['vertices'])
+            output['crossings'] = crossings # (5,2) tensor
+            output['crossing_mask'] = crossing_mask #(5,) tensor
+
+        return output
+
 
     def crossing_vs_2d(self, vs, dim=0):
         if self.lbs[dim] * self.ubs[dim] > 0:
@@ -975,35 +986,61 @@ class Zonotope(AbstractDomain):
         return mids
 
     def all_cross_2d(self, vs):
-        output = []
-        output.append(self.crossing_vs_2d(vs, dim=0))
-        output.append(self.crossing_vs_2d(vs, dim=1))
-        # And maybe add origin in there...
+        crossings = torch.zeros(5, 2).to(self.center.device)
+        crossing_mask = torch.zeros(5, dtype=torch.bool).to(self.center.device)
+        dim0_crossings = self.crossing_vs_2d(vs, dim=0)
+        dim1_crossings = self.crossing_vs_2d(vs, dim=1)
+        if dim0_crossings is not None:
+            crossings[[0,1], :] = dim0_crossings
+            crossing_mask[[0,1]] = True
+        if dim1_crossings is not None:
+            crossings[[2,3], :] = dim1_crossings
+            crossing_mask[[2, 3]] = True
 
-        if output[0] is not None and torch.prod(output[0][:,1]) < 0:
-            output.append(torch.zeros_like(self.center).view(1, -1))
-        noneless_output = [_ for _ in output if _ is not None]
-        if len(noneless_output) > 0:
-            return torch.cat(noneless_output)
-        return None
+        # And now check the origin
+        if dim0_crossings is not None and dim1_crossings is not None:
+            crossings[4,:] = 0.0
+            crossing_mask[4] = True
 
+        return crossings, crossing_mask
 
-    def relu_program_2d(self, c1, c2, vs=None):
+    def relu_program_2d(self, c1, c2, vertex_dict=None):
         """ Returns (min_val, argmin) for 2d relu program
         NOTE: does not consider axes vals!
         """
-        vs = vs if (vs is not None) else self.enumerate_vertices_2d(collect_crossings=True)
-        vals = vs @ c1 + torch.relu(vs) @ c2
-        min_val, argmin_idx = torch.min(vals, dim=0)
-        return min_val, vs[argmin_idx]
 
+
+        if vertex_dict is None:
+            vertex_dict = self.enumerate_vertices_2d(collect_crossings=True)
+
+        # Handle vertices
+        vs = vertex_dict['vertices']
+        v_vals = vs @ c1 + torch.relu(vs) @ c2
+
+        min_vertex_val, min_vertex_idx = torch.min(v_vals, dim=0)
+        min_vertex = vs[min_vertex_idx]
+
+        # Handle crossings
+        crossings = vertex_dict['crossings']
+        crossing_mask = vertex_dict['crossing_mask']
+        if max(crossing_mask) > 0: # any crossings true, check vals
+            crossing_vals = crossings @ c1 + torch.relu(crossings) @ c2
+            crossing_vals[~crossing_mask] = float('inf')
+            min_cross_val, min_cross_idx = torch.min(crossing_vals, dim=0)
+            if min_cross_val < min_vertex_val:
+                return min_cross_val, crossings[min_cross_idx]
+
+        # Fall back on min vertex
+        return min_vertex_val, min_vertex
+    '''
 
     def batch_2d_partition(self, groups=None):
         """ Enumerates vertices based on groups
         ARGS:
             groups: is a tensor of [[group1.x, group1.x], ...]
         RETURNS:
-            tensor of shape (num_groups, 2, 2*gensize)
+            tensor of shape (num_groups, 2, 2*gensize +1)
+            [the first vertex is repeated at the end for easy crossings]
         """
         assert self.dim % 2 == 0
         if groups is None:
@@ -1039,33 +1076,497 @@ class Zonotope(AbstractDomain):
         neg_vy = 2 * center[ys].view(-1, 1) - pos_vy
 
 
-        # Output is (#Groups, 2, #vertices)
-        return torch.stack([torch.cat([pos_vx, neg_vx], dim=1),
-                            torch.cat([pos_vy, neg_vy], dim=1)], dim=1)
+        # Output is (#Groups, 2, #vertices + 1)
+        return torch.stack([torch.cat([pos_vx, neg_vx, pos_vx[:,:1]], dim=1),
+                            torch.cat([pos_vy, neg_vy, pos_vy[:,:1]], dim=1)], dim=1)
 
-    def batch_2d_relu_program(self, c1, c2, groups=None, group_vs=None):
+
+    @staticmethod
+    def batch_2d_crossings(group_vertices):
+        """ Collects crossings/crossing masks for all 2d vertices
+        ARGS:
+            group_vertices: Tensor (num_groups, 2, gensize * 2)
+        RETURNS:
+            (crossings, crossing_mask)
+            crossings: (num_groups, 2, 5) - the axes crossing points (or zero if not exist)
+            crossing_mask : (num_groups, 5) - the mask for crossings (TRUE if crossing in zonotope)
+        """
+
+        num_groups = group_vertices.shape[0]
+        crossings = torch.zeros((num_groups, 2, 5)).to(group_vertices.device)
+        crossing_mask = torch.zeros(num_groups, 5, dtype=torch.bool).to(group_vertices.device)
+
+        # Now collect the crossing vertices for each dim
+        dim0_rayshoots = Zonotope._batch_zono_rayshoot(group_vertices, dim=0, val=0.0,
+                                                       device=group_vertices.device)
+        crossings[:,:, [0,1]] = dim0_rayshoots
+        crossing_mask[:, [0,1]] = (dim0_rayshoots[:,1,:] < float('inf'))
+
+        dim1_rayshoots = Zonotope._batch_zono_rayshoot(group_vertices, dim=1, val=0.0,
+                                                       device=group_vertices.device)
+        crossings[:,:, [2,3]] = dim1_rayshoots
+        crossing_mask[:, [2,3]] = (dim1_rayshoots[:,0,:] < float('inf'))
+
+        crossing_mask[:,4] = crossing_mask.sum(dim=1) == 4
+
+        return crossings, crossing_mask
+
+
+    @staticmethod
+    def _batch_zono_rayshoot(group_vertices, dim, val, device=torch.device(type='cpu')):
+        """ Computes the points a line crosses through a zonotope:
+            i.e. computes the interval on the zonotope for which zono[dim] ==val
+        ARGS:
+            group_vertices: tensor of shape (num_groups, 2, 2*gensize + 1)
+            dim: {0,1}, which dimension we're forcing here
+            val: float, or tensor of size (num_groups): the value we want to assert here
+            device: torch device to do evertyhing on
+        RETURNS:
+            crossing_intervals (tensor of shape (num_groups, (x,y), 2)
+        """
+
+        if isinstance(val, (float, int)):
+            val = torch.ones(group_vertices.shape[0]).to(device) * val
+
+        crossing_intervals = torch.zeros(group_vertices.shape[0], 2, 2).to(device)
+        crossing_intervals.fill_(float('inf'))
+
+        lbs = group_vertices[:,dim,:].min(dim=-1)[0]
+        ubs = group_vertices[:,dim,:].max(dim=-1)[0]
+
+        # Operate only on the relevant indices
+        group_idxs = ((lbs <= val) * (val <= ubs)).nonzero().flatten()
+        vs = group_vertices[group_idxs]
+        vals = val[group_idxs]
+        # Okay now consider the start indices where vs[dim,group] <= val  and vs[dim,group] >= val
+        # vs is [rel_idxs, 2, 2m+1]
+
+        for mult in [-1, 1]:
+            start_idxs = ((mult * vs[:,dim,:-1] <= mult * vals.view(-1, 1)) *
+                          (mult * vs[:,dim,1:] >= mult * vals.view(-1, 1))) #(g, 2m)
+            start_idxs = torch.max(start_idxs, dim=1)[1] # (g)
+
+            start_points = torch.cat([vs[:,0,:].gather(1, start_idxs.view(-1, 1)),
+                                      vs[:,1,:].gather(1, start_idxs.view(-1, 1))], dim=-1)
+            end_points = torch.cat([vs[:,0,:].gather(1, (start_idxs+1).view(-1, 1)),
+                                      vs[:,1,:].gather(1, (start_idxs+1).view(-1, 1))], dim=-1)
+            # each of these ^ is [g, 2]
+
+            diffs = end_points - start_points
+            lens = diffs[:,dim]
+            delta = vals - start_points[:,dim]
+            interp_factor = delta / lens
+            interp_factor[interp_factor != interp_factor] = 0
+
+            crossing_intervals[group_idxs, :, int((mult +1)/2) ] = start_points + interp_factor.view(-1, 1) * diffs
+
+        return torch.sort(crossing_intervals, dim=-1)[0]
+
+
+    @staticmethod
+    def _batch_2d_crossings_dim(group_vertices, dim, device=torch.device(type='cpu')):
+        # Just LOOP this for now (vectorize is a TODO)
+        output_crossings = []
+        output_crossing_masks = []
+        lbs = group_vertices[:,dim,:].min(dim=-1)[0]
+        ubs = group_vertices[:,dim,:].max(dim=-1)[0]
+
+        skips = (lbs * ubs) > 0
+        for i, vertices in enumerate(group_vertices): # (2, 2*gensize)
+            crossing = torch.zeros(2, 2).to(device)
+            crossing_mask = torch.zeros((2,), dtype=torch.bool).to(device)
+            if skips[i]:
+                output_crossings.append(crossing)
+                output_crossing_masks.append(crossing_mask)
+                continue
+
+            # Arcane crossing magic here...
+            crossing_mask = ~crossing_mask
+
+            vs = vertices.T
+            num_vs = vs.shape[0]
+            start_idxs = ((vs[1:,dim] * vs[:-1,dim]) < 0).nonzero().flatten()
+            if start_idxs.numel() == 1:
+                start_idxs = torch.cat([start_idxs, -torch.ones_like(start_idxs).long()])
+
+            point_idxs =torch.stack([start_idxs, ((start_idxs + 1) % vs.shape[0])], dim=1)
+            points = vs[point_idxs]
+            starts = points[:,0,:]
+            xs = points[:,:,dim]
+            lens = xs @ torch.tensor([-1.0,1.0], device=device)
+            diffs = points[:,1,:] - points[:,0,:]
+            interp_factor = -xs[:,0] / lens
+            offsets = diffs * interp_factor.view(-1, 1)
+            mids = starts + offsets
+
+            output_crossings.append(mids.T)
+            output_crossing_masks.append(crossing_mask)
+
+
+        return torch.stack(output_crossings, dim=0), torch.stack(output_crossing_masks, dim=0)
+
+
+
+    def batch_2d_relu_program(self, c1, c2, groups=None, group_vs=None,
+                              group_crossings=None, group_crossing_masks=None,
+                              box_bounds=None,
+                              group_vertex_masks=None, group_box_vertices=None,
+                              group_box_masks=None, box_zono_crossings=None,
+                              box_zono_masks=None):
         """ Solves relu program by partition into groups of 2d
             e.g. min c1*z + c2*relu(z)
         ARGS:
             c1,c2: tensor for objective vector
             groups: groups arg to be fed into batch_2d_partition
-            group_vs: if not None is like the output of batch_2d_partition
+            group_vs: if not None is like the output of batch_2d_partition (num_groups, 2, #vertices + 1)
+            group_crossings: if not None, is like the output of batch_2d_crossings (num_groups, 2, #vertices + 1)
+
+            ADDITIONS FOR BOX BUONDS:
+            box_bounds: is a hyperbox of same dimension as this (used to compute the rest of these)
+            group_vertex_masks: (num_groups, #vertices + 1) masks for zonotope vertices from boxes
+            group_box_vertices: (num_groups, 2, 9): vertices for the 9 possible box vertices
+            group_box_masks: (num_groups, 9): masks for the 9 possible box vertices
+            box_zono_crossings: (num_groups, 2, 8): vertices for the 8 possible box<->zono crossings
+            box_zono_masks: (num_groups, 8): masks for the box<->zono crossings
         RETURNS:
             min_val, argmin
         """
         if group_vs is None:
             group_vs = self.batch_2d_partition(groups=groups)
 
-        obj_vals = (c1[groups].unsqueeze(-1) * group_vs +
-                    c2[groups].unsqueeze(-1) * torch.relu(group_vs))
-        mins, min_idxs = obj_vals.sum(dim=1).min(dim=1)
-
-        argmin = torch.zeros_like(self.center)
-        argmin[groups[:,0]] = torch.gather(group_vs[:,0,:], 1, min_idxs.view(-1, 1)).squeeze()
-        argmin[groups[:,1]] = torch.gather(group_vs[:,1,:], 1, min_idxs.view(-1, 1)).squeeze()
-        return mins.sum(), argmin
+        if (group_crossings is None) or (group_crossing_masks is None):
+            group_crossings, group_crossing_masks = Zonotope.batch_2d_crossings(group_vs)
 
 
+        #----- compute box bound stuff if not computed already
+        if box_bounds is not None:
+            group_vertex_masks, group_crossing_masks = self.batch_zono_vertex_mask(groups, group_vs, box_bounds,
+                                                                                   group_crossings, group_crossing_masks)
+            group_box_vertices, group_box_masks = self.batch_box_corners_axes(groups, group_vs, box_bounds)
+            box_zono_crossings, box_zono_masks = self.batch_zono_box_crossings(groups, group_vs, box_bounds)
+        #--------------
+
+        # Now this gets tricky.
+        # Step one is to consider the values produced by vertices...
+        vertex_vals = (c1[groups].unsqueeze(-1) * group_vs +
+                       c2[groups].unsqueeze(-1) * torch.relu(group_vs)).sum(dim=1)
+
+        if group_vertex_masks is not None:
+            vertex_vals[~group_vertex_masks] = float('inf')
+        vertex_mins, vertex_min_idxs = vertex_vals.min(dim=1)
+
+        # Now consider the crossings
+        crossing_vals = (c1[groups].unsqueeze(-1) * group_crossings +
+                         c2[groups].unsqueeze(-1) * torch.relu(group_crossings)).sum(dim=1)
+
+        crossing_vals[~group_crossing_masks] = float('inf')
+        crossing_mins, crossing_min_idxs = crossing_vals.min(dim=1)
+
+
+        # if box bounds are specified, consider these, too
+        all_vs = [group_vs, group_crossings]
+        all_min_vals = [(vertex_mins, vertex_min_idxs), (crossing_mins, crossing_min_idxs)]
+        if group_vertex_masks is not None:
+            box_vertex_vals = (c1[groups].unsqueeze(-1) * group_box_vertices +
+                               c2[groups].unsqueeze(-1) * torch.relu(group_box_vertices)).sum(dim=1)
+
+            box_vertex_vals[~group_box_masks] = float('inf')
+            box_vertex_mins, box_vertex_min_idxs = box_vertex_vals_vals.min(dim=1)
+
+
+            # compute box<->zono mins and indices
+            box_zono_vals = (c1[groups].unsqueeze(-1) * box_zono_crossings +
+                             c2[groups].unsqueeze(-1) * torch.relu(box_zono_crossings)).sum(dim=1)
+
+            box_zono_vals[~box_zono_masks] = float('inf')
+            box_zono_mins, box_zono_min_idxs = box_zono_vals.min(dim=1)
+
+            all_vs.extend([group_box_vertices, box_zono_crossings])
+            all_min_vals.extend([(box_vertex_mins, box_vertex_min_idxs),
+                                 (box_zono_mins, box_zono_min_idxs)])
+
+
+        # And then take mins over candidates and combine the answers
+        all_vals = torch.stack([_[0] for _ in all_min_vals], dim=0)
+
+        all_mins, min_loc_idxs = all_vals.min(dim=0)
+
+        argmin = torch.zeros_like(groups).float()
+        for i, ((mins, min_idxs), vs) in enumerate(zip(all_min_vals, all_vs)):
+            argmin[min_loc_idxs == i] = vs[min_loc_idxs == i, :, min_idxs[min_loc_idxs == i]]
+
+        true_argmin = torch.zeros_like(self.center)
+        true_argmin[groups] = argmin
+        return all_mins.sum(), true_argmin
+
+
+    """ Box bounds for 2d additions:
+        4 parts here:
+            1. Adding in the box vertices and checking if contained in zonotopes
+                - returns box_vertices and box_mask
+            2. Building zonotope vertex mask for vertices not in 2d box  (including crossings)
+                - gets zonotope vertex mask
+            3. gets zonotope-box crossing points
+                - (and mask here?)
+            4. Modifying 2d relu program
+    """
+    @staticmethod
+    def batch_box_corners_axes(groups, group_vertices, box):
+        """ Part 1: adding box vertices to the zonotope:
+        ARGS:
+            groups: standard groups tensor
+            group_vertices: Tensor of shape (num_groups, 2, 2*gensize)
+            box: Hyperbox object we intersect with this zonotope
+        RETURNS:
+            box_vertices: (num_groups, 2, 9) for box vertices
+            box_masks: (num_groups, 9) for whether each vertex is in the zono
+
+        ORDER IS LIKE
+        Think about this like rayshooting:
+            left-column: (bottom, y-axis, top,)
+            right-column: (bottom, y-axis, top)
+            y-axis-column: (bottom, origin, top)
+
+            (LeftLow, LeftMid, LeftHi)
+            (RightLow, RightMid, RightHi)
+            (CenterLow, Origin, CenterHi)
+        """
+
+        group_lbs = box.lbs[groups] # (num_groups, 2)
+        group_ubs = box.ubs[groups] # (num_groups, 2)
+        x,y = 0, 1
+
+
+        left_xs = group_lbs[:,x]   # all these are size (num_groups,)
+        right_xs = group_ubs[:,x]
+        low_ys = group_lbs[:,y]
+        high_ys = group_ubs[:,y]
+
+        box_vertices = torch.zeros(len(groups), 2, 9).to(group_lbs.device)
+        # ^ (LeftLow, LeftMid, LeftHi, MidLow, Origin, MidHi, RightLow, RightMid, RightHi)
+        box_masks = torch.zeros_like(box_vertices[:,0,:], dtype=torch.bool)
+        # (num_groups, 9)
+
+
+        # ------------------------------LEFT COLUMN -------------------------------------------------
+        # (idxs 0,1,2)
+        left_rayshoots = Zonotope._batch_zono_rayshoot(group_vertices, dim=x, val=left_xs)
+        low_left_ys = left_rayshoots[:, y, 0]
+        hi_left_ys = left_rayshoots[:, y, 1]
+        left_groups = (low_left_ys < float('inf'))
+
+        # Only consider the crossings that happen:
+        if left_groups.sum() > 0:
+            # Bottom left corner is on when bottom_left_rayshoot is <= low_ys
+            box_vertices[left_groups, x, 0] = left_xs[left_groups] # bottom-left-x
+            box_vertices[left_groups, y, 0] = low_ys[left_groups] # bottom-left-y
+            box_masks[left_groups, 0] = (low_left_ys[left_groups] <= low_ys[left_groups])
+
+
+            # Up left corner is on when top_left_rayshoot >= high_ys
+            box_vertices[left_groups, x, 2] = left_xs[left_groups] # top-left-x
+            box_vertices[left_groups, y, 2] = high_ys[left_groups] # top-left-y
+            box_masks[left_groups, 2] = (hi_left_ys[left_groups] >= high_ys[left_groups])
+
+            # Mid left is on when box crosses hyperbox, and the compressed interval contains 0
+            box_vertices[left_groups, x, 1] = left_xs[left_groups]
+
+
+            left_box_contains_0 = ((low_ys[left_groups] * high_ys[left_groups]) <= 0)
+
+            left_bottom_corner = torch.max(low_ys[left_groups], low_left_ys[left_groups])
+            left_top_corner = torch.min(high_ys[left_groups], hi_left_ys[left_groups])
+            left_xing_contains_0 = ((left_bottom_corner * left_top_corner) <= 0)
+
+            box_masks[left_groups, 1] = (left_box_contains_0 * left_xing_contains_0)
+
+
+        # ----------------------------- RIGHT COLUMN -----------------------------------------------
+        # (idxs 678)
+        right_rayshoots = Zonotope._batch_zono_rayshoot(group_vertices, dim=x, val=right_xs)
+        low_right_ys = right_rayshoots[:, y, 0]
+        hi_right_ys = right_rayshoots[:, y, 1]
+        right_groups = (low_right_ys < float('inf'))
+
+        if right_groups.sum() > 0:
+            # Bottom right corner is on when bottom_right_rayshoot is <= low_ys
+            box_vertices[right_groups, x, 6] = right_xs[right_groups]
+            box_vertices[right_groups, y, 6] = low_ys[right_groups]
+            box_masks[right_groups, 6] = (low_right_ys[right_groups] <= low_ys[right_groups])
+
+            # Up right corner is on when top_right_rayshoot >= high_ys
+            box_vertices[right_groups, x, 8] = right_xs[right_groups] # top-right-x
+            box_vertices[right_groups, y, 8] = high_ys[right_groups] # top-right-y
+            box_masks[right_groups, 8] = (hi_right_ys[right_groups] >= high_ys[right_groups])
+
+            # Mid right is on when box crosses hyperbox, and the compressed interval contains 0
+            box_vertices[right_groups, x, 7] = right_xs[right_groups]
+
+            right_box_contains_0 = ((low_ys[right_groups] * high_ys[right_groups]) <= 0)
+
+            right_bottom_corner = torch.max(low_ys[right_groups], low_right_ys[right_groups])
+            right_top_corner = torch.min(high_ys[right_groups], hi_right_ys[right_groups])
+            right_xing_contains_0 = ((right_bottom_corner * right_top_corner) <= 0)
+
+            box_masks[right_groups, 7] = (right_box_contains_0 * right_xing_contains_0)
+
+
+        # ----------------------------- Y AXIS -----------------------------------------------
+        # idxs 3,4,5
+
+        mid_rayshoots = Zonotope._batch_zono_rayshoot(group_vertices, dim=x, val=0.0)
+        low_mid_ys = mid_rayshoots[:, y, 0]
+        hi_mid_ys = mid_rayshoots[:, y, 1]
+        mid_groups = (low_mid_ys < float('inf'))
+        mid_groups = mid_groups * ((low_ys * high_ys) <= 0) # only check crossings + box contains origin
+
+        if mid_groups.sum() > 0:
+            # Bottom mid-edge is on when bottom_mid_rayshoot is <= low_ys
+            box_vertices[mid_groups, y, 3] = low_ys[mid_groups]
+            box_masks[mid_groups, 3] = (low_mid_ys[mid_groups] <= low_ys[mid_groups])
+
+            # Up mid-edge is on when top_mid_rayshoot >= high_ys
+            box_vertices[mid_groups, y, 5] = high_ys[mid_groups]
+            box_masks[mid_groups, 5] = (hi_mid_ys >= high_ys[mid_groups])
+
+            # Mid-mid is on when zero is in both zono and box
+            box_contains_origin = ((low_ys[mid_groups] * high_ys[mid_groups]) <= 0)
+            zono_contains_origin = ((low_mid_ys[mid_groups] * hi_mid_ys[mid_groups]) <= 0)
+            box_masks[mid_groups, 4] = (box_contains_origin * zono_contains_origin)
+
+        return box_vertices, box_masks
+
+
+
+    @staticmethod
+    def batch_zono_vertex_mask(groups, group_vs, box, crossings, crossing_masks):
+        """ Part 2: builds a mask to eliminate zonotope vertices that are not contained in the box
+        ARGS:
+            groups: standard groups tensor
+            group_vs: Tensor of shape (num_groups, 2, 2*gensize)
+            box: Hyperbox object we intersect with this zonotope
+
+        RETURNS:
+            vertex_masks: (num_groups, 2*gensize)
+            crossing_masks: (num_groups, 5)
+        """
+        lbs = box.lbs[groups]
+        ubs = box.ubs[groups]
+        vertex_masks = ((lbs.unsqueeze(-1) <= group_vs) * (ubs.unsqueeze(-1) >= group_vs)).min(dim=1)[0]
+        new_crossing_masks = ((lbs.unsqueeze(-1) <= crossings) * (ubs.unsqueeze(-1) >= crossings)).min(dim=1)[0]
+
+        crossing_masks = new_crossing_masks * crossing_masks
+
+        return vertex_masks, crossing_masks
+
+    @staticmethod
+    def batch_zono_box_crossings(groups, group_vertices, box):
+        """ Part 3: builds box points that are when the zonotope and box intersect
+            (also gets a mask here)
+
+            RETURNS:
+            box_zono_crossings (num_groups, 2, 8)
+            box_zono_mask (num_groups, 8)
+        """
+        box_zono_crossings = torch.zeros(len(groups), 2, 8).to(group_vertices.device)
+        box_zono_masks = torch.zeros_like(box_zono_crossings[:,0,:], dtype=torch.bool)
+
+        group_lbs = box.lbs[groups] # (num_groups, 2)
+        group_ubs = box.ubs[groups] # (num_groups, 2)
+        x,y = 0, 1
+
+
+        left_box_xs = group_lbs[:,x]   # all these are size (num_groups,)
+        right_box_xs = group_ubs[:,x]
+        low_box_ys = group_lbs[:,y]
+        high_box_ys = group_ubs[:,y]
+
+        # 4 rayshoots here
+        #----------------------- LEFT RAYSHOOT -------------------------
+        # (idxs 0,1)
+        left_rayshoots = Zonotope._batch_zono_rayshoot(group_vertices, dim=x, val=left_box_xs)
+        low_left_zono_ys = left_rayshoots[:, y, 0]
+        hi_left_zono_ys = left_rayshoots[:, y, 1]
+        left_groups = (low_left_zono_ys < float('inf'))
+
+        # Only consider the crossings that happen:
+        if left_groups.sum() > 0:
+            # Lowleft crossing is when low_left_box <= low_left_zono
+            box_zono_crossings[left_groups, x, 0] = left_box_xs[left_groups]
+            box_zono_crossings[left_groups, y, 0] = low_left_zono_ys[left_groups]
+            box_zono_masks[left_groups, 0] = (low_box_ys[left_groups] <= low_left_zono_ys[left_groups])
+
+            # Hileft crossing is when high_left_box >= hi_left_zono
+            box_zono_crossings[left_groups, x, 1] = left_box_xs[left_groups]
+            box_zono_crossings[left_groups, y, 1] = hi_left_zono_ys[left_groups]
+            box_zono_masks[left_groups, 1] = (high_box_ys[left_groups] >= hi_left_zono_ys[left_groups])
+
+
+        #----------------------- RIGHT RAYSHOOT -------------------------
+        # (idxs 2,3)
+        right_rayshoots = Zonotope._batch_zono_rayshoot(group_vertices, dim=x, val=right_box_xs)
+        low_right_zono_ys = right_rayshoots[:, y, 0]
+        hi_right_zono_ys = right_rayshoots[:, y, 1]
+        right_groups = (low_right_zono_ys < float('inf'))
+
+        # Only consider the crossings that happen:
+        if right_groups.sum() > 0:
+            # lowright crossing is when low_right_box <= low_right_zono
+            box_zono_crossings[right_groups, x, 2] = right_box_xs[right_groups]
+            box_zono_crossings[right_groups, y, 2] = low_right_zono_ys[right_groups]
+            box_zono_masks[right_groups, 2] = (low_box_ys[right_groups] <= low_right_zono_ys[right_groups])
+
+            # Hileft crossing is when high_left_box >= hi_left_zono
+            box_zono_crossings[right_groups, x, 3] = right_box_xs[right_groups]
+            box_zono_crossings[right_groups, y, 3] = hi_right_zono_ys[right_groups]
+            box_zono_masks[right_groups, 3] = (high_box_ys[right_groups] >= hi_right_zono_ys[right_groups])
+
+        #----------------------- TOP RAYSHOOT -------------------------
+        # (idxs 4,5)
+        top_rayshoots = Zonotope._batch_zono_rayshoot(group_vertices, dim=y, val=high_box_ys)
+        top_left_zono_xs = top_rayshoots[:, x, 0]
+        top_right_zono_xs = top_rayshoots[:, x, 1]
+        top_groups = (top_right_zono_xs < float('inf'))
+
+        # Only consider the crossings that happen:
+        if top_groups.sum() > 0:
+            # Topleft crossing is when top_left_box_xs <= top_right_zono_xs
+            box_zono_crossings[top_groups, x, 4] = top_left_zono_xs[top_groups]
+            box_zono_crossings[top_groups, y, 4] = high_box_ys[top_groups]
+            box_zono_masks[top_groups, 4] = (left_box_xs[top_groups] <= top_left_zono_xs[top_groups])
+
+            # topright crossing is when top_right_box_xs >= hi_right_zono_xs
+            box_zono_crossings[top_groups, x, 5] = top_right_zono_xs[top_groups]
+            box_zono_crossings[top_groups, y, 5] = high_box_ys[top_groups]
+            box_zono_masks[top_groups, 5] = (right_box_xs[top_groups] >= top_right_zono_xs[top_groups])
+
+
+        #----------------------- BOTTOM RAYSHOOT -------------------------
+        # (idxs 6,7)
+        bot_rayshoots = Zonotope._batch_zono_rayshoot(group_vertices, dim=y, val=low_box_ys)
+        bot_left_zono_xs = bot_rayshoots[:, x, 0]
+        bot_right_zono_xs = bot_rayshoots[:, x, 1]
+        bot_groups = (bot_right_zono_xs < float('inf'))
+
+        # Only consider the crossings that happen:
+        if bot_groups.sum() > 0:
+            # Botleft crossing is when left_box_xs <= bot_right_zono_xs
+            box_zono_crossings[bot_groups, x, 6] = bot_left_zono_xs[bot_groups]
+            box_zono_crossings[bot_groups, y, 6] = low_box_ys[bot_groups]
+            box_zono_masks[bot_groups, 6] = (left_box_xs[bot_groups] <= bot_left_zono_xs[bot_groups])
+
+            # botright crossing is when right_box_xs >= bot_right_zono_xs
+            box_zono_crossings[bot_groups, x, 7] = bot_right_zono_xs[bot_groups]
+            box_zono_crossings[bot_groups, y, 7] = low_box_ys[bot_groups]
+            box_zono_masks[bot_groups, 7] = (right_box_xs[bot_groups] >= bot_right_zono_xs[bot_groups])
+
+
+        return box_zono_crossings, box_zono_masks
+
+
+
+
+    '''
     # LOOP methods (not as fast, but has crossings)
     def loop_batch_zono_vs(self, groups=None):
         # Set up groups
@@ -1074,36 +1575,24 @@ class Zonotope(AbstractDomain):
             groups = torch.rand_like(self.dim).sort()[1].view(-1, 2)
         for group in groups:
             subzono = Zonotope(self.center[group], self.generator[group,:])
+
             outputs.append(subzono.enumerate_vertices_2d(collect_crossings=True))
 
 
+        # shape is (num_groups, 2, gensize*2)
+        vertices = torch.stack([_['vertices'].T for _ in outputs], dim=0)
+        crossings = torch.stack([_['crossings'].T for _ in outputs], dim=0)
+        crossing_masks = torch.stack([_['crossing_mask'] for _ in outputs], dim=0)
 
-        """ HACK HERE:
-            Because of the crossings, the groups no longer have same
-            number of vertices. Ideally I want to shape them like
-            outputs.shape == (num_groups, 2, #vertices)
-            But #vertices differs so I will just pad with the first
-            few columns (rows here) of each
-        """
-        # padding block
-        max_vs = max([_.shape[0] for _ in outputs])
-        for i, el in enumerate(outputs):
-            num_to_pad = max_vs - el.shape[0]
-            if num_to_pad == 0:
-                continue
-            pad = el[:num_to_pad, :]
-            outputs[i] = torch.cat([el, pad])
+        return {'vertices': vertices,
+                'crossings': crossings,
+                'crossing_mask': crossing_masks}
 
-
-
-
-        return torch.stack([_.T for _ in outputs], dim=0)
-
-        # return outputs
 
     def loop_zono_rp(self, c1, c2, groups=None, loop_outs=None):
 
         def rp_vertices_2d(vs, c1, c2):
+
             vals = vs @ c1 + torch.relu(vs) @ c2
             min_val, argmin_idx = torch.min(vals, dim=0)
             return min_val, vs[argmin_idx]
@@ -1116,11 +1605,13 @@ class Zonotope(AbstractDomain):
 
         argmin = torch.zeros_like(self.center)
         min_val = 0.0
-        for output, group in zip(loop_outs, groups):
-            sub_min, sub_argmin = rp_vertices_2d(output, c1[group], c2[group])
+        for loop_out, group in zip(loop_outs, groups):
+            sub_min, sub_argmin = self.relu_program_2d(c1[group], c2[group], vertex_dict=loop_out)
             min_val += sub_min
             argmin[group] = sub_argmin
         return min_val, argmin
+    '''
+
 
 # ========================================================
 # =                      POLYTOPES                       =
