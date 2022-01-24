@@ -66,11 +66,11 @@ class PartitionGroup():
 
 		# --- box info stuff
 		self.box_info = box_info
-		self.vertex_masks = None
-		self.box_vertices = None
-		self.box_masks = None
-		self.box_zono_crossings = None
-		self.bxox_zono_masks = None
+		self.vertex_masks = {}
+		self.box_vertices = {}
+		self.box_masks = {}
+		self.box_zono_crossings = {}
+		self.box_zono_masks = {}
 
 
 		self.input_shapes = input_shapes
@@ -93,21 +93,15 @@ class PartitionGroup():
 			outzono_list.append(zono)
 		return outzono_list
 
-	def _access_ith_partition_dim(self, i):
-		if self.partition_dim is None:
-			return None
-		if isinstance(self.partition_dim, int):
-			return self.partition_dim
-		if isinstance(self.partition_dim, dict):
-			return self.partition_dim[i]
 
-	def _access_ith_num_partitions(self, i):
-		if self.num_partitions is None:
+	@staticmethod
+	def _access_intdict(i, intdict):
+		if intdict is None:
 			return None
-		if isinstance(self.num_partitions, int):
-			return self.num_partitions
-		if isinstance(self.num_partitions, dict):
-			return self.num_partitions[i]
+		if isinstance(intdict, int):
+			return intdict
+		if isinstance(intdict, dict):
+			return intdict[i]
 
 
 	def make_all_partitions(self, **kwargs):
@@ -154,12 +148,12 @@ class PartitionGroup():
 				groups = [indexes[i: i+part_dim] for i in range(0, zono.dim, part_dim)]
 
 		elif self.partition_rule == 'similarity':
-			if self._access_ith_partition_dim(i) == 2:
+			if self._access_intdict(i, self.partition_dim) == 2:
 				groups = self._make_similarity_groups(i)
 			else:
 				groups = utils.partition(list(range(zono.dim)), num_parts)
 		elif self.partition_rule == 'axalign':
-			if self._access_ith_partition_dim(i) == 2:
+			if self._access_intdict(i, self.partition_dim) == 2:
 				groups = self._make_axalign_groups(i)
 			else:
 				groups = utils.partition(list(range(zono.dim)), num_parts)
@@ -176,7 +170,7 @@ class PartitionGroup():
 		# Now with groups check to see if we want to save
 		if self.save_partitions:
 			self.groups[i] = groups
-			if self.save_models:
+			if self.save_models and any(len(_) > 2 for _ in groups):
 				subzonos = self.order_sweep([_[1] for _ in zono.partition(groups)])
 				[_._setup_relu_mip2() for _ in subzonos]
 				self.subzonos[i] = subzonos
@@ -307,7 +301,7 @@ class PartitionGroup():
 
 
 		# ~~~~~~~~~~~~~~~~~~~~~~~New block~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
-		if not self.force_mip and all(len(_) == 2 for _ in groups):
+		if not self.force_mip and all(len(_) <= 2 for _ in groups):
 			groups = utils.tensorfy(groups).long().to(zono.center.device)
 			if self.vertices.get(i) is None: # if haven't computed the vertices yet...
 
@@ -317,18 +311,18 @@ class PartitionGroup():
 
 
 				# -------------  BOX INFO STUFF
-				if self.box_info is not None: # If box info exists...
+				if self.box_info is not None : # If box info exists...
 					# compute box related vertices
 					box = self.box_info[i]
-					crossing_masks, vertex_masks = zono.batch_zono_vertex_mask(groups, vertices, box,
+					vertex_masks, crossing_masks = zono.batch_zono_vertex_mask(groups, vertices, box,
 																			   crossings, crossing_masks)
 					box_vertices, box_masks = zono.batch_box_corners_axes(groups, vertices, box)
 					box_zono_crossings, box_zono_masks = zono.batch_zono_box_crossings(groups, vertices, box)
 				else: # otherwise
 					# Set these as None, so no errors
-					vertex_masks = None
-					box_vertices = box_masks = None
-					box_zono_crossings = box_zono_masks = None
+					vertex_masks = {}
+					box_vertices = box_masks = {}
+					box_zono_crossings = box_zono_masks = {}
 				# ----------------------------------------
 
 				if self.cache_vertices: # if we want to cache....
@@ -336,22 +330,25 @@ class PartitionGroup():
 					self.vertices[i] = vertices
 					self.crossings[i] = crossings
 					self.crossing_masks[i] = crossing_masks
-					self.vertex_masks = vertex_masks
-					self.box_vertices = box_vertices
-					self.box_masks = box_masks
-					self.box_zono_crossings = box_zono_crossings
-					self.box_zono_masks = box_zono_masks
+					self.vertex_masks[i] = vertex_masks
+					self.box_vertices[i] = box_vertices
+					self.box_masks[i] = box_masks
+					self.box_zono_crossings[i] = box_zono_crossings
+					self.box_zono_masks[i] = box_zono_masks
 
 			else:
+
 				vertices = self.vertices[i]
 				crossings = self.crossings[i]
 				crossing_masks = self.crossing_masks[i]
 
-				vertex_masks = (self.vertex_masks or {}).get(i)
-				box_vertices = (self.box_vertices or {}).get(i)
-				box_masks = (self.box_masks or {}).get(i)
-				box_zono_crossings = (self.box_zono_crossings or {}).get(i)
-				box_zono_masks = (self.box_zono_masks or {}).get(i)
+
+
+				vertex_masks = self.vertex_masks.get(i)
+				box_vertices = self.box_vertices.get(i)
+				box_masks = self.box_masks.get(i)
+				box_zono_crossings = self.box_zono_crossings.get(i)
+				box_zono_masks = self.box_zono_masks.get(i)
 
 
 
@@ -429,7 +426,7 @@ class PartitionGroup():
 			assert partition_dim is not None
 			for idx, group in self.groups.items():
 				current_groupsize = max(len(_) for _ in group)
-				new_groupsize = self._access_ith_partition_dim(idx)
+				new_groupsize = self._access_intdict(idx, partition_dim)
 
 				if new_groupsize == current_groupsize:
 					new_groups[idx] = group
@@ -442,7 +439,7 @@ class PartitionGroup():
 			assert num_partitions is not None
 			for idx, group in self.groups.items():
 				current_numgroups = len(group)
-				new_numgroups = self._access_ith_num_partitions(idx)
+				new_numgroups = self._access_intdict(idx, num_partitions)
 
 				if new_numgroups == current_numgroups:
 					new_groups[idx] = group
@@ -455,28 +452,46 @@ class PartitionGroup():
 		new_partition_dim = partition_dim
 		new_num_partitions = num_partitions
 
-		# Now modify the vertices
+		# Now modify the stuff for 2d zonotopes
 		new_vertices = {}
+		new_crossings = {}
+		new_crossing_masks = {}
+
+		new_vertex_masks = {}
+		new_box_vertices = {}
+		new_box_masks = {}
+		new_box_zono_crossings = {}
+		new_box_zono_masks = {}
+
 		for idx, group in new_groups.items():
 			if group == self.groups[idx] and self.vertices.get(idx) is not None:
 				new_vertices[idx] = self.vertices[idx]
+				new_crossings[idx] = self.crossings[idx]
+				new_crossing_masks[idx] = self.crossing_masks[idx]
+				if self.box_info is not None:
+					new_vertex_masks[idx] = self.vertex_masks[idx]
+					new_box_vertices[idx] = self.box_vertices[idx]
+					new_box_masks[idx] = self.box_masks[idx]
+					new_box_zono_crossings[idx] = self.box_zono_crossings[idx]
+					new_box_zono_masks[idx] = self.box_zono_masks[idx]
+
+
 
 
 		# Now make the new zonos (and setup MIPs)
 		new_subzonos = {}
 		if self.save_partitions:
 			if self.save_models:
-				for idx, group in new_groups.items():
-					if max(len(_) for _ in group) <= 2: # only build MIP models if groupsize > 2
+				for idx, new_group in new_groups.items():
+					if max(len(_) for _ in new_group) <= 2: # only build MIP models if groupsize > 2
 						continue
 					zono = self.base_zonotopes[idx]
-					if group == self.groups[idx]:
+					if new_group == self.groups[idx]:
 						new_subzonos[idx] = self.subzonos.get(idx) # No change to subzonos if no change to groups
 						continue
 
-
-					subzonos = self.order_sweep([_[1] for _ in zono.partition(group)])
-					for subgroup, subzono in zip(group, subzonos):
+					subzonos = self.order_sweep([_[1] for _ in zono.partition(new_group)])
+					for subgroup, subzono in zip(new_group, subzonos):
 						box_bounds = None
 						if self.box_info is not None:
 							box_bounds = self.box_info[idx][subgroup]
@@ -494,19 +509,23 @@ class PartitionGroup():
 									 cache_vertices=self.cache_vertices,
 									 use_crossings=self.use_crossings,
 									 box_info=self.box_info)
-			new_obj.vertices = new_vertices
-			new_obj.base_zonotopes = self.base_zonotopes
-			new_obj.groups = new_groups
-			new_obj.subzonos = new_subzonos
-			return new_obj
 		else:
-			self.partition_dim = partition_dim
-			self.num_partitions = new_num_partitions
-			self.vertices = new_vertices
-			self.groups = new_groups
-			self.subzonos = new_subzonos
-			self.box_info = box_info
-			return self
+			new_obj = self
+		new_obj.base_zonotopes = self.base_zonotopes
+		new_obj.partition_dim = partition_dim
+		new_obj.num_partitions = new_num_partitions
+		new_obj.vertices = new_vertices
+		new_obj.crossings = new_crossings
+		new_obj.crossing_masks = new_crossing_masks
+		new_obj.groups = new_groups
+		new_obj.subzonos = new_subzonos
+		new_obj.box_info = self.box_info
+		new_obj.vertex_masks = new_vertex_masks
+		new_obj.box_vertices = new_box_vertices
+		new_obj.box_masks = new_box_masks
+		new_obj.box_zono_crossings = new_box_zono_crossings
+		new_obj.box_zono_masks = new_box_zono_masks
+		return new_obj
 
 
 

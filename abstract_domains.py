@@ -729,7 +729,7 @@ class Zonotope(AbstractDomain):
         xs = model.addMVar(self.dim, lb=lbs - eps, ub=ubs + eps, name='x')
 
 
-        model.addConstr(self.generator.detach().cpu().numpy() @ ys + self.center.cpu().numpy() == xs)
+        model.addConstr(self.generator.detach().cpu().numpy() @ ys + self.center.detach().cpu().numpy() == xs)
         model.update()
         return {'model': model,
                 'xs': xs,
@@ -798,26 +798,37 @@ class Zonotope(AbstractDomain):
 
         xs, ys = mip_dict['xs'], mip_dict['ys']
 
+
+        # Adding box bounds here
+        if box_bounds is None:
+            lbs = self.lbs
+            ubs = self.ubs
+        else:
+            lbs = torch.max(self.lbs, box_bounds.lbs)
+            ubs = torch.min(self.ubs, box_bounds.ubs)
+
+
+
         # Now add ReLU constraints, using the big-M encoding
-        off_neurons = (self.ubs < 0)
-        on_neurons = (self.lbs >= 0)
+        off_neurons = (ubs < 0)
+        on_neurons = (lbs >= 0)
         on_idxs = on_neurons.nonzero().flatten().cpu()
         unc_neurons = ~(off_neurons + on_neurons)
         unc_idxs = unc_neurons.nonzero().flatten().cpu()
-        relu_vars = model.addMVar(len(unc_idxs), lb=0, ub=self.ubs[unc_idxs], name='relu')
+        relu_vars = model.addMVar(len(unc_idxs), lb=0, ub=ubs[unc_idxs], name='relu')
         zs = model.addMVar(len(unc_idxs), vtype=gb.GRB.BINARY, name='z')
 
         if len(unc_idxs) > 1:
             model.addConstr(relu_vars >= xs[unc_idxs])
             # Maybe diagflats aren't best here...
-            model.addConstr(relu_vars <= np.diagflat(self.ubs[unc_idxs].detach().cpu().numpy()) @ zs)
-            model.addConstr(relu_vars + self.lbs[unc_idxs].squeeze().detach().cpu().numpy() <=
-                        xs[unc_idxs] + np.diagflat(self.lbs[unc_idxs].detach().cpu().numpy()) @ zs)
+            model.addConstr(relu_vars <= np.diagflat(ubs[unc_idxs].detach().cpu().numpy()) @ zs)
+            model.addConstr(relu_vars + lbs[unc_idxs].squeeze().detach().cpu().numpy() <=
+                        xs[unc_idxs] + np.diagflat(lbs[unc_idxs].detach().cpu().numpy()) @ zs)
         else:
             for i, idx in enumerate(unc_idxs):
                 model.addConstr(relu_vars[i] >= xs[idx])
-                model.addConstr(relu_vars[i] <= self.ubs[idx].item() * zs[i])
-                model.addConstr(relu_vars[i] <= xs[idx] - (1- zs[i]) * self.lbs[idx].item())
+                model.addConstr(relu_vars[i] <= ubs[idx].item() * zs[i])
+                model.addConstr(relu_vars[i] <= xs[idx] - (1- zs[i]) * lbs[idx].item())
 
 
         model.update()
@@ -1239,7 +1250,7 @@ class Zonotope(AbstractDomain):
 
 
         #----- compute box bound stuff if not computed already
-        if box_bounds is not None:
+        if box_bounds:
             group_vertex_masks, group_crossing_masks = self.batch_zono_vertex_mask(groups, group_vs, box_bounds,
                                                                                    group_crossings, group_crossing_masks)
             group_box_vertices, group_box_masks = self.batch_box_corners_axes(groups, group_vs, box_bounds)
@@ -1251,7 +1262,7 @@ class Zonotope(AbstractDomain):
         vertex_vals = (c1[groups].unsqueeze(-1) * group_vs +
                        c2[groups].unsqueeze(-1) * torch.relu(group_vs)).sum(dim=1)
 
-        if group_vertex_masks is not None:
+        if group_vertex_masks != None and group_vertex_masks != {}:
             vertex_vals[~group_vertex_masks] = float('inf')
         vertex_mins, vertex_min_idxs = vertex_vals.min(dim=1)
 
@@ -1266,12 +1277,12 @@ class Zonotope(AbstractDomain):
         # if box bounds are specified, consider these, too
         all_vs = [group_vs, group_crossings]
         all_min_vals = [(vertex_mins, vertex_min_idxs), (crossing_mins, crossing_min_idxs)]
-        if group_vertex_masks is not None:
+        if group_vertex_masks != None and group_vertex_masks != {}:
             box_vertex_vals = (c1[groups].unsqueeze(-1) * group_box_vertices +
                                c2[groups].unsqueeze(-1) * torch.relu(group_box_vertices)).sum(dim=1)
 
             box_vertex_vals[~group_box_masks] = float('inf')
-            box_vertex_mins, box_vertex_min_idxs = box_vertex_vals_vals.min(dim=1)
+            box_vertex_mins, box_vertex_min_idxs = box_vertex_vals.min(dim=1)
 
 
             # compute box<->zono mins and indices
@@ -1427,7 +1438,7 @@ class Zonotope(AbstractDomain):
 
             # Up mid-edge is on when top_mid_rayshoot >= high_ys
             box_vertices[mid_groups, y, 5] = high_ys[mid_groups]
-            box_masks[mid_groups, 5] = (hi_mid_ys >= high_ys[mid_groups])
+            box_masks[mid_groups, 5] = (hi_mid_ys[mid_groups] >= high_ys[mid_groups])
 
             # Mid-mid is on when zero is in both zono and box
             box_contains_origin = ((low_ys[mid_groups] * high_ys[mid_groups]) <= 0)

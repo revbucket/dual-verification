@@ -1,3 +1,6 @@
 [submodule "decomposition_plnn_bounds"]
 	path = decomposition_plnn_bounds
 	url = git@github.com:oval-group/decomposition-plnn-bounds.git
+[submodule "scaling-the-convex-barrier"]
+	path = scaling_the_convex_barrier
+	url = git@github.com:oval-group/scaling-the-convex-barrier.git
