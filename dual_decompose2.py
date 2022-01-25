@@ -237,14 +237,14 @@ class DecompDual2:
             return method_dict[self.choice](idx, rhos)
 
 
-    def dual_ascent(self, num_steps, optim_obj=None, verbose=True, logger=None):
+    def dual_ascent(self, num_steps, optim_obj=None, verbose=True, logger=None, iter_start=0):
         """ Runs dual ascent for num_steps, using the optim_obj specified
             logger is a fxn that takes (self, step#) as args
         """
         optim_obj = optim_obj if (optim_obj is not None) else optim.Adam(self.parameters(), lr=1e-3)
         logger = (lambda self, iter_num: None) if (logger is None) else logger
         last_time = time.time()
-        for step in range(num_steps):
+        for step in range(iter_start, iter_start + num_steps):
             optim_obj.zero_grad()
             loss_val = -1 * self.lagrangian()
             loss_val.backward()

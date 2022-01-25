@@ -12,6 +12,14 @@ import utilities as utils
 from lp_relaxation import LPRelax
 
 from abstract_domains import Hyperbox, Zonotope, Polytope
+
+import os, sys
+real_path = os.path.realpath(__file__)
+dir_path = os.path.dirname(real_path)
+stcb_path = os.path.join(dir_path, 'decomposition_plnn_bounds')
+sys.path.append(stcb_path)
+
+
 from decomposition_plnn_bounds.plnn_bounds.proxlp_solver.solver import SaddleLP
 
 
@@ -92,9 +100,14 @@ class FFNet(nn.Module):
         weight_shape = new_linear_layer.weight.shape
         new_linear_layer.weight.data = (final_linear.weight[i] -
                                         final_linear.weight[j]).data.view(weight_shape)
-        new_linear_layer.bias.data = (final_linear.bias[i] -
-                                      final_linear.bias[j]).data.view(1)
 
+        if final_linear.bias != None:
+            new_linear_layer.bias.data = (final_linear.bias[i] -
+                                          final_linear.bias[j]).data.view(1)
+        else:
+            new_linear_layer.bias.data.zero_()
+
+        new_linear_layer.input_shape = torch.Size([new_linear_layer.in_features])
         new_net = nn.Sequential(*list(self.net[:-1]) + [new_linear_layer])
         return FFNet(new_net, self.dtype)
 

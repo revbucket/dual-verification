@@ -31,6 +31,17 @@ def no_grad(f):
 # =           Other helpful methods                      =
 # ========================================================
 
+def negate_layer(layer):
+    """ Replaces the weights and biases of a layer with their negatives
+        NOTE: This MODIFIES THE LAYER (so be careful to copy!)
+    """
+    assert isinstance(layer, (nn.Linear, nn.Conv2d))
+
+    layer.weight.data = -1 * layer.weight.data
+    if layer.bias != None:
+        layer.bias.data = -1 * layer.bias.data
+    return layer
+
 
 def add_flattens(network):
     """ Given an iterable of layers, builds a nn.Sequential with
@@ -181,6 +192,17 @@ def show_grayscale(images: torch.Tensor, size=None):
         ax.grid(False)
         ax.imshow(row, cmap='gray')
 
+
+def show_rgb(images: torch.Tensor, size=None):
+    # Tensor is a (N, 3, H, W) image with values between [0, 1]
+    row = torch.cat([_.squeeze() for _ in images], -1).detach().cpu().numpy()
+    if size is not None:
+        fig, ax = plt.subplots()
+    else:
+        fig, ax = plt.subplots(figsize=size)
+
+    ax.grid(False)
+    ax.imshow(row.transpose(1,2,0))
 
 
 

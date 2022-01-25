@@ -54,6 +54,13 @@ class Hyperbox(AbstractDomain):
         self.rad = self.rad.cpu()
         return self
 
+    def to(self, device):
+        for attr in [self.lbs, self.ubs, self.center, self.rad]:
+            attr.to(device)
+        return self
+
+
+
     def twocol(self):
         return torch.stack([self.lbs, self.ubs]).T
 
@@ -1168,7 +1175,6 @@ class Zonotope(AbstractDomain):
             delta = vals - start_points[:,dim]
             interp_factor = delta / lens
             interp_factor[interp_factor != interp_factor] = 0
-
             crossing_intervals[group_idxs, :, int((mult +1)/2) ] = start_points + interp_factor.view(-1, 1) * diffs
 
         return torch.sort(crossing_intervals, dim=-1)[0]
@@ -1361,7 +1367,8 @@ class Zonotope(AbstractDomain):
 
         # ------------------------------LEFT COLUMN -------------------------------------------------
         # (idxs 0,1,2)
-        left_rayshoots = Zonotope._batch_zono_rayshoot(group_vertices, dim=x, val=left_xs)
+        left_rayshoots = Zonotope._batch_zono_rayshoot(group_vertices, dim=x, val=left_xs,
+                                                       device=group_vertices.device)
         low_left_ys = left_rayshoots[:, y, 0]
         hi_left_ys = left_rayshoots[:, y, 1]
         left_groups = (low_left_ys < float('inf'))
@@ -1394,7 +1401,8 @@ class Zonotope(AbstractDomain):
 
         # ----------------------------- RIGHT COLUMN -----------------------------------------------
         # (idxs 678)
-        right_rayshoots = Zonotope._batch_zono_rayshoot(group_vertices, dim=x, val=right_xs)
+        right_rayshoots = Zonotope._batch_zono_rayshoot(group_vertices, dim=x, val=right_xs,
+                                                        device=group_vertices.device)
         low_right_ys = right_rayshoots[:, y, 0]
         hi_right_ys = right_rayshoots[:, y, 1]
         right_groups = (low_right_ys < float('inf'))
@@ -1425,7 +1433,8 @@ class Zonotope(AbstractDomain):
         # ----------------------------- Y AXIS -----------------------------------------------
         # idxs 3,4,5
 
-        mid_rayshoots = Zonotope._batch_zono_rayshoot(group_vertices, dim=x, val=0.0)
+        mid_rayshoots = Zonotope._batch_zono_rayshoot(group_vertices, dim=x, val=0.0,
+                                                      device=group_vertices.device)
         low_mid_ys = mid_rayshoots[:, y, 0]
         hi_mid_ys = mid_rayshoots[:, y, 1]
         mid_groups = (low_mid_ys < float('inf'))
@@ -1495,7 +1504,8 @@ class Zonotope(AbstractDomain):
         # 4 rayshoots here
         #----------------------- LEFT RAYSHOOT -------------------------
         # (idxs 0,1)
-        left_rayshoots = Zonotope._batch_zono_rayshoot(group_vertices, dim=x, val=left_box_xs)
+        left_rayshoots = Zonotope._batch_zono_rayshoot(group_vertices, dim=x, val=left_box_xs,
+                                                       device=group_vertices.device)
         low_left_zono_ys = left_rayshoots[:, y, 0]
         hi_left_zono_ys = left_rayshoots[:, y, 1]
         left_groups = (low_left_zono_ys < float('inf'))
@@ -1515,7 +1525,8 @@ class Zonotope(AbstractDomain):
 
         #----------------------- RIGHT RAYSHOOT -------------------------
         # (idxs 2,3)
-        right_rayshoots = Zonotope._batch_zono_rayshoot(group_vertices, dim=x, val=right_box_xs)
+        right_rayshoots = Zonotope._batch_zono_rayshoot(group_vertices, dim=x, val=right_box_xs,
+                                                        device=group_vertices.device)
         low_right_zono_ys = right_rayshoots[:, y, 0]
         hi_right_zono_ys = right_rayshoots[:, y, 1]
         right_groups = (low_right_zono_ys < float('inf'))
@@ -1534,7 +1545,8 @@ class Zonotope(AbstractDomain):
 
         #----------------------- TOP RAYSHOOT -------------------------
         # (idxs 4,5)
-        top_rayshoots = Zonotope._batch_zono_rayshoot(group_vertices, dim=y, val=high_box_ys)
+        top_rayshoots = Zonotope._batch_zono_rayshoot(group_vertices, dim=y, val=high_box_ys,
+                                                      device=group_vertices.device)
         top_left_zono_xs = top_rayshoots[:, x, 0]
         top_right_zono_xs = top_rayshoots[:, x, 1]
         top_groups = (top_right_zono_xs < float('inf'))
@@ -1554,7 +1566,8 @@ class Zonotope(AbstractDomain):
 
         #----------------------- BOTTOM RAYSHOOT -------------------------
         # (idxs 6,7)
-        bot_rayshoots = Zonotope._batch_zono_rayshoot(group_vertices, dim=y, val=low_box_ys)
+        bot_rayshoots = Zonotope._batch_zono_rayshoot(group_vertices, dim=y, val=low_box_ys,
+                                                      device=group_vertices.device)
         bot_left_zono_xs = bot_rayshoots[:, x, 0]
         bot_right_zono_xs = bot_rayshoots[:, x, 1]
         bot_groups = (bot_right_zono_xs < float('inf'))
