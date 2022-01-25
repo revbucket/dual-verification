@@ -7,7 +7,6 @@ authors = ["Your Name <you@example.com>"]
 [tool.poetry.dependencies]
 python = "^3.9"
 numpy = "^1.22.0"
-torch = "^1.10.1"
 gurobipy = "^9.5.0"
 matplotlib = "^3.5.1"
 torchvision = "^0.11.2"
@@ -17,6 +16,8 @@ cvxpy = "^1.1.18"
 cvxopt = "^1.2.7"
 tabulate = "^0.8.9"
 joblib = "^1.1.0"
+torch = "^1.10.1"
+pandas = "^1.4.0"
 
 [tool.poetry.dev-dependencies]
 black = "^21.12b0"
