@@ -18,6 +18,7 @@ import experiment_utils as eu
 import argparse
 import pickle
 import pprint
+import glob
 import utilities as utils
 
 parser = argparse.ArgumentParser()
@@ -46,7 +47,7 @@ def decomp_2d_mip(bin_net, test_input):
 
 def write_file(idx, output_dict):
     PREFIX = 'exp_data/cifar_sgd_'
-    with utils.safe_open(filenamer, 'wb') as f:
+    with utils.safe_open(filenamer(idx), 'wb') as f:
         pickle.dump(output_dict, f)
 
 
@@ -68,6 +69,9 @@ for idx in range(args.start_idx, args.end_idx):
         print("Skipping example %s : incorrect model" % idx)
         continue
 
+    if len(glob.glob(filenamer(idx))) >= 1:
+        print("Skipping example %s: file already exists" % idx)
+        continue
 
     output_dict = {}
 
