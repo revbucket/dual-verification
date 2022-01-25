@@ -35,12 +35,12 @@ print(args)
 def decomp_2d_mip(bin_net, test_input):
     start_time = time.time()
     decomp_obj= eu.decomp_2d_MNIST_PARAMS(bin_net, test_input, return_obj=True)
-    decomp_obj.merge_partitions(partition_dim={1:2, 3:2, 5:2, 7: 16, 9:1})
+    decomp_obj.merge_partitions(partition_dim={1:2, 3:2, 5:2, 7: 2, 9:20, 11: 1})
     return decomp_obj.lagrangian().item(), time.time() - start_time
 
 
 def write_file(idx, output_dict):
-    PREFIX = 'exp_data/mnist_ffnet_'
+    PREFIX = 'exp_data/mnist_deep_'
     with open(PREFIX + str(idx) + '.pkl', 'wb') as f:
         pickle.dump(output_dict, f)
 
@@ -50,13 +50,13 @@ def write_file(idx, output_dict):
 
 
 
-ffnet = eu.load_mnist_ffnet()
+mnist_deep = eu.load_mnist_deep_net()
 
 for idx in range(args.start_idx, args.end_idx):
     print('Handling MNIST example %s' % idx)
 
 
-    bin_net, test_input = eu.setup_mnist_example(ffnet, idx, args.eps)
+    bin_net, test_input = eu.setup_mnist_example(mnist_deep, idx, args.eps)
 
 
     if bin_net is None:
