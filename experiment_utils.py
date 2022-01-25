@@ -57,6 +57,11 @@ from scaling_the_convex_barrier.plnn.modules import View, Flatten
 # =           GLOBAL EXPERIMENT HELPERS                                         =
 # ===============================================================================
 
+def try_cache_clear():
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+
 def hbox_to_domain(hbox, network=None):
     # General method to convert Hyperbox inputs to the format used by stcb
     if network is not None:
@@ -68,6 +73,12 @@ def hbox_to_domain(hbox, network=None):
     lbs = shaper(hbox.lbs)
     ubs = shaper(hbox.ubs)
     return torch.stack([lbs, ubs], dim=-1).unsqueeze(0)
+
+
+def ovalnet_to_zonoinfo(ovalnet, bin_net, test_input):
+    all_boxes = [Hyperbox(lb.flatten().data, ub.flatten().data) for (lb,ub)
+                 in zip(ovalnet.lower_bounds, ovalnet.upper_bounds)]
+    return BoxInformedZonos(bin_net, test_input, box_range=all_boxes).compute()
 
 
 def get_device():
@@ -93,7 +104,7 @@ def get_best_naive_kw(bin_net, test_input):
     return intermediate_lbs, intermediate_ubs
 
 
-def run_optprox(bin_net, test_input, use_intermed=True):
+def run_optprox(bin_net, test_input, use_intermed=True, return_model=False):
     device = get_device()
     # THEN RUN OPTPROX
     optprox_params = {
@@ -125,15 +136,17 @@ def run_optprox(bin_net, test_input, use_intermed=True):
             lb, ub = optprox_net.compute_lower_bound()
 
     optprox_time = time.time() - optprox_start
+    if return_model:
+        return optprox_net, lb.cpu().item(), optprox_time
     return lb.cpu().item(), optprox_time
 
 
-def run_explp(bin_net, test_input, use_intermed=True):
+def run_explp(bin_net, test_input, use_intermed=True, return_model=False, num_iters=1000):
     device = get_device()
 
     # EXPLP
     explp_params = {
-        "nb_iter": 1000, #Using 1k iters as a benchmark
+        "nb_iter": num_iters, #Using 1k iters as a benchmark
         'bigm': "init",
         'cut': "only",
         "bigm_algorithm": "adam",
@@ -150,8 +163,8 @@ def run_explp(bin_net, test_input, use_intermed=True):
             'betas': (0.9, 0.999)
         },
     }
-    domain = hbox_to_domain(test_input, bin_net).to(device)
-    exp_net = ExpLP([lay for lay in copy.deepcopy(bin_net).to(device)],
+    domain = hbox_to_domain(test_input, bin_net)
+    exp_net = ExpLP(copy.deepcopy(bin_net).to(device),
                      params=explp_params, use_preactivation=True, fixed_M=True)
 
     exp_start = time.time()
@@ -166,15 +179,21 @@ def run_explp(bin_net, test_input, use_intermed=True):
             lb, ub = exp_net.compute_lower_bound()
     exp_end = time.time()
     exp_time = exp_end - exp_start
+
+    if return_model:
+        return exp_net, lb.cpu().item(), exp_time
     return lb.item(), exp_time
 
 
 def run_anderson_1cut(bin_net, test_input, use_intermed=True):
     device = get_device()
     domain = hbox_to_domain(test_input, bin_net).to(device)
-    elided_model = copy.deepcopy(bin_net).to(device)
+    intermediate_lbs, intermediate_ubs = get_best_naive_kw(bin_net, test_input)
 
-    elided_model_layers = [lay for lay in elided_model]
+    domain.cpu()
+
+    elided_model = copy.deepcopy(bin_net)
+    elided_model_layers = [lay.cpu() for lay in elided_model]
     elided_model_layers[-1] = utils.negate_layer(elided_model_layers[-1])
     lp_and_grb_net = AndersonLinearizedNetwork(elided_model_layers, mode="lp-cut",
                                                n_cuts=1, cuts_per_neuron=True)
@@ -185,8 +204,7 @@ def run_anderson_1cut(bin_net, test_input, use_intermed=True):
         lb = lp_and_grb_net.lower_bounds[-1]
         print(ub, lb)
     else:
-        intermediate_lbs, intermediate_ubs = get_best_naive_kw(bin_net, test_input)
-        lp_and_grb_net.build_model_using_bounds(domain[0], ([lbs[0].cpu() for lbs in intermediate_lbs],
+        lp_and_grb_net.build_model_using_bounds(domain[0].cpu(), ([lbs[0].cpu() for lbs in intermediate_lbs],
                                                          [ubs[0].cpu() for ubs in intermediate_ubs]), n_threads=4)
         lb, ub = lp_and_grb_net.compute_lower_bound(ub_only=True)
     lp_and_grb_end = time.time()
@@ -198,7 +216,13 @@ def run_anderson_1cut(bin_net, test_input, use_intermed=True):
 def run_lp(bin_net, test_input, use_intermed=True):
     device = get_device()
     domain = hbox_to_domain(test_input, bin_net).to(device)
+    intermediate_lbs, intermediate_ubs = get_best_naive_kw(bin_net, test_input)
+
     elided_model = copy.deepcopy(bin_net).to(device)
+
+
+    elided_model = elided_model.cpu()
+    domain = domain.cpu()
 
     elided_model_layers = [lay for lay in elided_model]
     elided_model_layers[-1] = utils.negate_layer(elided_model_layers[-1])
@@ -210,8 +234,8 @@ def run_lp(bin_net, test_input, use_intermed=True):
         lb = lp_and_grb_net.lower_bounds[-1]
         print(ub, lb)
     else:
-        intermediate_lbs, intermediate_ubs = get_best_naive_kw(bin_net, test_input)
-        lp_and_grb_net.build_model_using_bounds(domain[0], ([lbs[0].cpu() for lbs in intermediate_lbs],
+
+        lp_and_grb_net.build_model_using_bounds(domain[0].cpu(), ([lbs[0].cpu() for lbs in intermediate_lbs],
                                                          [ubs[0].cpu() for ubs in intermediate_ubs]), n_threads=4)
         lb, ub = lp_and_grb_net.compute_lower_bound(ub_only=True)
     lp_and_grb_end = time.time()
@@ -229,7 +253,7 @@ def setup_mnist_example(network, ex_id, eps, show=False):
     # Sets up an example on the mnist dataset. Returns None if net is wrong on this example
     # Otherwise, returns (bin_net, Hyperbox) that we evaluate
     # By default clips into range [0,1]
-    valset = datasets.MNIST(root=train.DEFAULT_DATASET_DIR, train=False, download=False,
+    valset = datasets.MNIST(root=train.DEFAULT_DATASET_DIR, train=False, download=True,
                             transform=transforms.ToTensor())
     device = get_device()
     x, y = valset[ex_id]
@@ -298,16 +322,19 @@ def load_mnist_deep_net(pth=None):
 
 #####--------------------------- Decomp parameters here for various nets here -------------
 
-def decomp_2d_MNIST_PARAMS(bin_net, test_input, return_obj=False):
+def decomp_2d_MNIST_PARAMS(bin_net, test_input, return_obj=False, preact_bounds=None,
+                           time_offset=0.0):
     device = get_device()
     bin_net.to(device)
     test_input.to(device)
 
     start_time = time.time()
     # Use best of KW/Naive to inform zonos
-    lbs, ubs = get_best_naive_kw(bin_net, test_input)
-    hboxes = [Hyperbox(lb.flatten(), ub.flatten()) for (lb, ub) in zip(lbs, ubs)]
-    preact_bounds = BoxInformedZonos(bin_net, test_input, box_range=hboxes).compute()
+
+    if preact_bounds is None:
+        lbs, ubs = get_best_naive_kw(bin_net, test_input)
+        hboxes = [Hyperbox(lb.flatten(), ub.flatten()) for (lb, ub) in zip(lbs, ubs)]
+        preact_bounds = BoxInformedZonos(bin_net, test_input, box_range=hboxes).compute()
 
     # Define partition object
     partition_obj = PartitionGroup(None, style='fixed_dim', partition_rule='similarity',
@@ -325,12 +352,132 @@ def decomp_2d_MNIST_PARAMS(bin_net, test_input, return_obj=False):
 
     if return_obj:
         return decomp
-    return last_val.item(), time.time() - start_time
+    return last_val.item(), time_offset + time.time() - start_time
 
 
-def decomp_2d_mip_MNIST_WIDE(bin_net, test_input):
-    # Hardcoding in the final partition size we want
+
+
+# ===============================================================================
+# =           CIFAR EXPERIMENT HELPERS                                          =
+# ===============================================================================
+
+
+
+
+def setup_cifar_example(network, ex_id, eps):
+    # Sets up an example on the cifar dataset. Returns None if net is wrong on this example
+    # Otherwise, returns (bin_net, Hyperbox) that we evaluate
+    # By default clips into range [0,1]
+
+    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.225, 0.225, 0.225])
+
+    valset = datasets.CIFAR10(root=train.DEFAULT_DATASET_DIR, train=False, download=True,
+                            transform=transforms.Compose([transforms.ToTensor(), normalize]))
+    device = get_device()
+    x, y = valset[ex_id]
+    x = x.to(device)
+
+    network.to(device)
+    pred_label = network(x[None]).squeeze().max(dim=0)[1]
+
+    if y != pred_label.item():
+        return None, None
+    bin_net = network.binarize(y, (y+1) % 10).to(device)
+
+    test_input = Hyperbox.linf_box(x.flatten(), eps)
+    bin_net(x[None])
+    return bin_net, test_input
+
+
+def load_cifar_sgd(pth=None):
+    model = nn.Sequential(
+        nn.Conv2d(3, 16, 4, stride=2, padding=1),
+        nn.ReLU(),
+        nn.Conv2d(16, 32, 4, stride=2, padding=1),
+        nn.ReLU(),
+        nn.Flatten(),
+        nn.Linear(32*8*8,100),
+        nn.ReLU(),
+        nn.Linear(100, 10)
+    )
+
+    ffnet = FFNet(model)
+
+    if pth is None:
+        pth = os.path.join(dir_path, 'networks/cifar_sgd.pth')
+
+    ffnet.load_state_dict(torch.load(pth, map_location='cpu'))
+    ffnet(torch.rand(1,3,32,32))# sets shapes
+    return ffnet
+
+
+def load_cifar_madry(pth=None):
+    model = nn.Sequential(
+        nn.Conv2d(3, 16, 4, stride=2, padding=1),
+        nn.ReLU(),
+        nn.Conv2d(16, 32, 4, stride=2, padding=1),
+        nn.ReLU(),
+        nn.Flatten(),
+        nn.Linear(32*8*8,100),
+        nn.ReLU(),
+        nn.Linear(100, 10)
+    )
+
+    ffnet = FFNet(model)
+
+    if pth is None:
+        pth = os.path.join(dir_path, 'networks/cifar_madry.pth')
+
+    ffnet.load_state_dict(torch.load(pth, map_location='cpu'))
+    ffnet(torch.rand(1,3,32,32))# sets shapes
+    return ffnet
+
+def load_mnist_wide_net(pth=None):
+    sequential = nn.Sequential(nn.Conv2d(1, 16, 4, stride=2, padding=1, bias=True), nn.ReLU(),
+                               nn.Conv2d(16, 32, 4, stride=2, padding=1, bias=True), nn.ReLU(),
+                               nn.Flatten(),
+                               nn.Linear(32 * 7 * 7, 100, bias=True), nn.ReLU(),
+                               nn.Linear(100, 10, bias=True))
+
+    ffnet = FFNet(sequential)
+    if pth is None:
+        pth = os.path.join(dir_path, 'networks/mnist_wide.pth')
+    ffnet.load_state_dict(torch.load(pth, map_location='cpu'))
+    ffnet(torch.rand(1,1,28,28))# sets shapes
+    return ffnet
+
+
+
+def decomp_2d_CIFAR_PARAMS(bin_net, test_input, return_obj=False, preact_bounds=None,
+                           time_offset=0.0):
+    device = get_device()
+    bin_net.to(device)
+    test_input.to(device)
+
     start_time = time.time()
-    decomp_obj= decomp_2d_MNIST_PARAMS(bin_net, test_input, return_obj=True)
-    decomp_obj.merge_partitions(partition_dim={1:2, 3:2, 5:20, 7: 2})
-    return decomp_obj.lagrangian().item(), time.time() - start_time
+    # Use best of KW/Naive to inform zonos
+    if preact_bounds is None:
+        lbs, ubs = get_best_naive_kw(bin_net, test_input)
+        hboxes = [Hyperbox(lb.flatten(), ub.flatten()) for (lb, ub) in zip(lbs, ubs)]
+        preact_bounds = BoxInformedZonos(bin_net, test_input, box_range=hboxes).compute()
+
+    # Define partition object
+    input_shapes = [l.input_shape for l in bin_net.net]
+
+    partition_obj = PartitionGroup(None, style='fixed_dim', partition_rule='spatial',
+                                   partition_dim=2, input_shapes=input_shapes)
+
+    # Main dual object and ascent procedure
+    decomp = DecompDual2(bin_net, test_input, Zonotope, 'partition', zero_dual=False,
+                         partition=partition_obj, preact_bounds=preact_bounds)
+
+    optim_obj = optim.Adam(decomp.parameters(), lr=2.5e-3)
+    scheduler = optim.lr_scheduler.MultiplicativeLR(optim_obj, lambda epoch: 0.5, last_epoch=- 1, verbose=False)
+    for i in range(5):
+        last_val = decomp.dual_ascent(200, verbose=50, optim_obj=optim_obj, iter_start=i * 200)
+        scheduler.step()
+
+    if return_obj:
+        return decomp
+    return last_val.item(), time_offset + time.time() - start_time
