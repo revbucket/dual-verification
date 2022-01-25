@@ -1,1 +1,6 @@
 /exp_data
+/data
+__pycache__
+/migrated
+/nbconfig
+/.ipynb_checkpoints
