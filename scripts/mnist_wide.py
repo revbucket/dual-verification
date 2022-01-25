@@ -31,6 +31,9 @@ print(args)
 
 
 ####################################################
+PREFIX = 'exp_data/mnist_wide_'
+def filenamer(idx):
+    return PREFIX + str(idx) + '.pkl'
 
 def decomp_2d_mip(bin_net, test_input):
     start_time = time.time()
@@ -40,8 +43,8 @@ def decomp_2d_mip(bin_net, test_input):
 
 
 def write_file(idx, output_dict):
-    PREFIX = 'exp_data/mnist_wide_'
-    with open(PREFIX + str(idx) + '.pkl', 'wb') as f:
+
+    with open(filenamer(idx), 'wb') as f:
         pickle.dump(output_dict, f)
 
 
@@ -61,6 +64,9 @@ for idx in range(args.start_idx, args.end_idx):
 
     if bin_net is None:
         print("Skipping example %s : incorrect model" % idx)
+        continue
+    if len(glob.glob(filenamer(idx))) >= 1:
+        print("Skipping example %s: file already exists" % idx)
         continue
 
     output_dict = {}
