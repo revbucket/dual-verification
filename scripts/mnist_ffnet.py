@@ -63,15 +63,17 @@ for idx in range(args.start_idx, args.end_idx):
         print("Skipping example %s : incorrect model" % idx)
         continue
 
-
     output_dict = {}
-    output_dict['decomp_2d'] = eu.decomp_2d_MNIST_PARAMS(bin_net, test_input)
-    output_dict['decomp_mip'] = decomp_2d_mip(bin_net, test_input)
-
-    output_dict['optprox'] = eu.run_optprox(bin_net, test_input, use_intermed=True)
-    output_dict['explp'] = eu.run_explp(bin_net, test_input, use_intermed=True)
-    output_dict['anderson'] = eu.run_anderson_1cut(bin_net, test_input, use_intermed=True)
-    output_dict['lp'] = eu.run_lp(bin_net, test_input, use_intermed=True)
+    for k, method in {'decomp_2d': eu.decomp_2d_MNIST_PARAMS,
+                      'decomp_mip': decomp_2d_mip,
+                      'optprox': eu.run_optprox,
+                      'explp': eu.run_explp,
+                      'anderson': eu.run_anderson_1cut,
+                      'lp': eu.run_lp}.items():
+        try:
+            output_dict[k] = method(bin_net, test_input)
+        except:
+            print("WARNING: %s FAILED ON EXAMPLE %s" % (k, idx))
 
 
 
