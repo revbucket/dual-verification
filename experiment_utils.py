@@ -150,8 +150,8 @@ def run_explp(bin_net, test_input, use_intermed=True):
             'betas': (0.9, 0.999)
         },
     }
-    domain = hbox_to_domain(test_input, bin_net).to(device)
-    exp_net = ExpLP([lay for lay in copy.deepcopy(bin_net).to(device)],
+    domain = hbox_to_domain(test_input, bin_net)
+    exp_net = ExpLP(copy.deepcopy(bin_net).to(device),
                      params=explp_params, use_preactivation=True, fixed_M=True)
 
     exp_start = time.time()
@@ -172,9 +172,12 @@ def run_explp(bin_net, test_input, use_intermed=True):
 def run_anderson_1cut(bin_net, test_input, use_intermed=True):
     device = get_device()
     domain = hbox_to_domain(test_input, bin_net).to(device)
-    elided_model = copy.deepcopy(bin_net).to(device)
+    intermediate_lbs, intermediate_ubs = get_best_naive_kw(bin_net, test_input)
 
-    elided_model_layers = [lay for lay in elided_model]
+    domain.cpu()
+
+    elided_model = copy.deepcopy(bin_net)
+    elided_model_layers = [lay.cpu() for lay in elided_model]
     elided_model_layers[-1] = utils.negate_layer(elided_model_layers[-1])
     lp_and_grb_net = AndersonLinearizedNetwork(elided_model_layers, mode="lp-cut",
                                                n_cuts=1, cuts_per_neuron=True)
@@ -185,8 +188,7 @@ def run_anderson_1cut(bin_net, test_input, use_intermed=True):
         lb = lp_and_grb_net.lower_bounds[-1]
         print(ub, lb)
     else:
-        intermediate_lbs, intermediate_ubs = get_best_naive_kw(bin_net, test_input)
-        lp_and_grb_net.build_model_using_bounds(domain[0], ([lbs[0].cpu() for lbs in intermediate_lbs],
+        lp_and_grb_net.build_model_using_bounds(domain[0].cpu(), ([lbs[0].cpu() for lbs in intermediate_lbs],
                                                          [ubs[0].cpu() for ubs in intermediate_ubs]), n_threads=4)
         lb, ub = lp_and_grb_net.compute_lower_bound(ub_only=True)
     lp_and_grb_end = time.time()
@@ -198,7 +200,13 @@ def run_anderson_1cut(bin_net, test_input, use_intermed=True):
 def run_lp(bin_net, test_input, use_intermed=True):
     device = get_device()
     domain = hbox_to_domain(test_input, bin_net).to(device)
+    intermediate_lbs, intermediate_ubs = get_best_naive_kw(bin_net, test_input)
+
     elided_model = copy.deepcopy(bin_net).to(device)
+
+
+    elided_model = elided_model.cpu()
+    domain = domain.cpu()
 
     elided_model_layers = [lay for lay in elided_model]
     elided_model_layers[-1] = utils.negate_layer(elided_model_layers[-1])
@@ -210,8 +218,8 @@ def run_lp(bin_net, test_input, use_intermed=True):
         lb = lp_and_grb_net.lower_bounds[-1]
         print(ub, lb)
     else:
-        intermediate_lbs, intermediate_ubs = get_best_naive_kw(bin_net, test_input)
-        lp_and_grb_net.build_model_using_bounds(domain[0], ([lbs[0].cpu() for lbs in intermediate_lbs],
+
+        lp_and_grb_net.build_model_using_bounds(domain[0].cpu(), ([lbs[0].cpu() for lbs in intermediate_lbs],
                                                          [ubs[0].cpu() for ubs in intermediate_ubs]), n_threads=4)
         lb, ub = lp_and_grb_net.compute_lower_bound(ub_only=True)
     lp_and_grb_end = time.time()
