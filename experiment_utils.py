@@ -362,18 +362,6 @@ def decomp_2d_MNIST_PARAMS(bin_net, test_input, return_obj=False, preact_bounds=
 # ===============================================================================
 
 
-
-
-<<<<<<< HEAD
-=======
-# ===============================================================================
-# =           CIFAR EXPERIMENT HELPERS                                          =
-# ===============================================================================
-
-
-
-
->>>>>>> 694b9ee3a39694fc18df09dfed006e8b8be70e57
 def setup_cifar_example(network, ex_id, eps):
     # Sets up an example on the cifar dataset. Returns None if net is wrong on this example
     # Otherwise, returns (bin_net, Hyperbox) that we evaluate
@@ -459,28 +447,20 @@ def load_mnist_wide_net(pth=None):
 
 
 
-<<<<<<< HEAD
+
 def decomp_2d_CIFAR_PARAMS(bin_net, test_input, return_obj=False, preact_bounds=None,
                            time_offset=0.0):
-=======
-def decomp_2d_CIFAR_PARAMS(bin_net, test_input, return_obj=False):
->>>>>>> 694b9ee3a39694fc18df09dfed006e8b8be70e57
     device = get_device()
     bin_net.to(device)
     test_input.to(device)
 
     start_time = time.time()
     # Use best of KW/Naive to inform zonos
-<<<<<<< HEAD
+
     if preact_bounds is None:
         lbs, ubs = get_best_naive_kw(bin_net, test_input)
         hboxes = [Hyperbox(lb.flatten(), ub.flatten()) for (lb, ub) in zip(lbs, ubs)]
         preact_bounds = BoxInformedZonos(bin_net, test_input, box_range=hboxes).compute()
-=======
-    lbs, ubs = get_best_naive_kw(bin_net, test_input)
-    hboxes = [Hyperbox(lb.flatten(), ub.flatten()) for (lb, ub) in zip(lbs, ubs)]
-    preact_bounds = BoxInformedZonos(bin_net, test_input, box_range=hboxes).compute()
->>>>>>> 694b9ee3a39694fc18df09dfed006e8b8be70e57
 
     # Define partition object
     input_shapes = [l.input_shape for l in bin_net.net]
@@ -500,8 +480,5 @@ def decomp_2d_CIFAR_PARAMS(bin_net, test_input, return_obj=False):
 
     if return_obj:
         return decomp
-<<<<<<< HEAD
+
     return last_val.item(), time_offset + time.time() - start_time
-=======
-    return last_val.item(), time.time() - start_time
->>>>>>> 694b9ee3a39694fc18df09dfed006e8b8be70e57
