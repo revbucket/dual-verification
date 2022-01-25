@@ -19,6 +19,7 @@ import argparse
 import pickle
 import pprint
 import glob
+import utilities as utils
 
 parser = argparse.ArgumentParser()
 # usage: python -m scripts.mnist_ffnet 0 10 0.1
@@ -33,7 +34,7 @@ print(args)
 
 
 ####################################################
-PREFIX = 'exp_data/mnist_ffnet_'
+PREFIX = 'exp_data/mnist_ffnet/'
 def filenamer(idx):
     return PREFIX + str(idx) + '.pkl'
 
@@ -45,7 +46,7 @@ def decomp_2d_mip(bin_net, test_input):
 
 
 def write_file(idx, output_dict):
-    with open(filenamer(idx), 'wb') as f:
+    with utils.safe_open(filenamer(idx), 'wb') as f:
         pickle.dump(output_dict, f)
 
 

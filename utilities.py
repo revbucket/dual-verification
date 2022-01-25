@@ -4,6 +4,7 @@ import torch.nn as nn
 import matplotlib.pyplot as plt
 import random
 import math
+import os
 # =========================================================
 # =           Constructors and abstract classes           =
 # =========================================================
@@ -30,6 +31,13 @@ def no_grad(f):
 # ========================================================
 # =           Other helpful methods                      =
 # ========================================================
+
+def safe_open(path, style='wb'):
+    ''' Open "path" for writing, creating any parent directories as needed.
+    '''
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    return open(path, style)
+
 
 def negate_layer(layer):
     """ Replaces the weights and biases of a layer with their negatives

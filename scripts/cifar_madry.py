@@ -18,6 +18,7 @@ import experiment_utils as eu
 import argparse
 import pickle
 import pprint
+import utilities as utils
 
 parser = argparse.ArgumentParser()
 # usage: python -m scripts.mnist_ffnet 0 10 0.1
@@ -30,7 +31,13 @@ assert args.start_idx < args.end_idx
 print(args)
 
 
+
 ####################################################
+
+PREFIX = 'exp_data/cifar_madry/'
+def filenamer(idx):
+    return PREFIX + str(idx) + '.pkl'
+
 
 def decomp_2d_mip(bin_net, test_input):
     start_time = time.time()
@@ -41,7 +48,7 @@ def decomp_2d_mip(bin_net, test_input):
 
 def write_file(idx, output_dict):
     PREFIX = 'exp_data/cifar_madry_'
-    with open(PREFIX + str(idx) + '.pkl', 'wb') as f:
+    with utils.safe_open(filenamer(idx), 'wb') as f:
         pickle.dump(output_dict, f)
 
 
@@ -61,6 +68,9 @@ for idx in range(args.start_idx, args.end_idx):
 
     if bin_net is None:
         print("Skipping example %s : incorrect model" % idx)
+        continue
+    if len(glob.glob(filenamer(idx))) >= 1:
+        print("Skipping example %s: file already exists" % idx)
         continue
 
 
