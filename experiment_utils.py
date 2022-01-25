@@ -266,7 +266,7 @@ def load_mnist_ffnet(pth=None):
     ffnet(torch.rand(1,1,28,28))# sets shapes
     return ffnet
 
-def load_mnist_wide_net(pth='../networks/mnist_wide.pth'):
+def load_mnist_wide_net(pth=None):
     sequential = nn.Sequential(nn.Conv2d(1, 16, 4, stride=2, padding=1, bias=True), nn.ReLU(),
                                nn.Conv2d(16, 32, 4, stride=2, padding=1, bias=True), nn.ReLU(),
                                nn.Flatten(),
@@ -274,13 +274,14 @@ def load_mnist_wide_net(pth='../networks/mnist_wide.pth'):
                                nn.Linear(100, 10, bias=True))
 
     ffnet = FFNet(sequential)
-
+    if pth is None:
+        pth = os.path.join(dir_path, 'networks/mnist_wide.pth')
     ffnet.load_state_dict(torch.load(pth, map_location='cpu'))
     ffnet(torch.rand(1,1,28,28))# sets shapes
     return ffnet
 
 
-def load_mnist_deep_net(pth='../networks/mnist_deep.pth'):
+def load_mnist_deep_net(pth=None):
     sequential = nn.Sequential(nn.Conv2d(1, 8, 4, stride=2, padding=1, bias=True), nn.ReLU(),
                                nn.Conv2d(8, 8, 3, stride=1, padding=1, bias=True), nn.ReLU(),
                                nn.Conv2d(8, 8, 3, stride=1, padding=1, bias=True), nn.ReLU(),
@@ -289,6 +290,8 @@ def load_mnist_deep_net(pth='../networks/mnist_deep.pth'):
                                nn.Linear(8 * 7 * 7, 100, bias=True), nn.ReLU(),
                                nn.Linear(100, 10))
     ffnet = FFNet(sequential)
+    if pth is None:
+        pth = os.path.join(dir_path, 'networks/mnist_deep.pth')
     ffnet.load_state_dict(torch.load(pth, map_location='cpu'))
     ffnet(torch.rand(1,1,28,28))# sets shapes
     return ffnet
