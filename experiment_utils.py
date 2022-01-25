@@ -172,7 +172,7 @@ def run_explp(bin_net, test_input, use_intermed=True):
 def run_anderson_1cut(bin_net, test_input, use_intermed=True):
     device = get_device()
     domain = hbox_to_domain(test_input, bin_net).to(device)
-    elided_model = copy.deepcopy(bin_net).cpu()
+    elided_model = copy.deepcopy(bin_net).to(device)
 
     elided_model_layers = [lay for lay in elided_model]
     elided_model_layers[-1] = utils.negate_layer(elided_model_layers[-1])
@@ -191,14 +191,14 @@ def run_anderson_1cut(bin_net, test_input, use_intermed=True):
         lb, ub = lp_and_grb_net.compute_lower_bound(ub_only=True)
     lp_and_grb_end = time.time()
     lp_and_grb_time = lp_and_grb_end - lp_and_grb_start
-    lp_and_grb_lbs = -torch.Tensor(ub).cpu()
-    return lp_and_grb_lbs.item(), lp_and_grb_time
+    lp_and_grb_lbs = -ub.item()
+    return lp_and_grb_lbs, lp_and_grb_time
 
 
 def run_lp(bin_net, test_input, use_intermed=True):
     device = get_device()
     domain = hbox_to_domain(test_input, bin_net).to(device)
-    elided_model = copy.deepcopy(bin_net).cpu()
+    elided_model = copy.deepcopy(bin_net).to(device)
 
     elided_model_layers = [lay for lay in elided_model]
     elided_model_layers[-1] = utils.negate_layer(elided_model_layers[-1])
@@ -216,7 +216,7 @@ def run_lp(bin_net, test_input, use_intermed=True):
         lb, ub = lp_and_grb_net.compute_lower_bound(ub_only=True)
     lp_and_grb_end = time.time()
     lp_and_grb_time = lp_and_grb_end - lp_and_grb_start
-    lp_and_grb_lbs = -torch.Tensor(ub).cpu()
+    lp_and_grb_lbs = -ub
     return lp_and_grb_lbs.item(), lp_and_grb_time
 
 
@@ -234,15 +234,16 @@ def setup_mnist_example(network, ex_id, eps, show=False):
     device = get_device()
     x, y = valset[ex_id]
     x = x.to(device)
+
     if show:
         utils.show_grayscale(x)
 
+    network.to(device)
     pred_label = network(x[None]).squeeze().max(dim=0)[1]
 
     if y != pred_label.item():
         return None, None
-
-    bin_net = network.binarize(y, (y+1) % 10)
+    bin_net = network.binarize(y, (y+1) % 10).to(device)
 
     test_input = Hyperbox.linf_box(x.flatten(), eps).clamp(0.0, 1.0)
     bin_net(x[None])
