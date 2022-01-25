@@ -18,6 +18,7 @@ import experiment_utils as eu
 import argparse
 import pickle
 import pprint
+import utilities as utils
 
 parser = argparse.ArgumentParser()
 # usage: python -m scripts.mnist_ffnet 0 10 0.1
@@ -30,7 +31,13 @@ assert args.start_idx < args.end_idx
 print(args)
 
 
+
 ####################################################
+
+PREFIX = 'exp_data/cifar_madry/'
+def filenamer(idx):
+    return PREFIX + str(idx) + '.pkl'
+
 
 def decomp_2d_mip(bin_net, test_input):
     start_time = time.time()
@@ -41,7 +48,7 @@ def decomp_2d_mip(bin_net, test_input):
 
 def write_file(idx, output_dict):
     PREFIX = 'exp_data/cifar_madry_'
-    with open(PREFIX + str(idx) + '.pkl', 'wb') as f:
+    with utils.safe_open(filenamer(idx), 'wb') as f:
         pickle.dump(output_dict, f)
 
 
@@ -62,17 +69,23 @@ for idx in range(args.start_idx, args.end_idx):
     if bin_net is None:
         print("Skipping example %s : incorrect model" % idx)
         continue
+    if len(glob.glob(filenamer(idx))) >= 1:
+        print("Skipping example %s: file already exists" % idx)
+        continue
 
 
     output_dict = {}
-    output_dict['decomp_2d'] = eu.decomp_2d_CIFAR_PARAMS(bin_net, test_input)
-    output_dict['decomp_mip'] = decomp_2d_mip(bin_net, test_input)
 
-    output_dict['optprox'] = eu.run_optprox(bin_net, test_input, use_intermed=True)
-    output_dict['explp'] = eu.run_explp(bin_net, test_input, use_intermed=True)
-    output_dict['anderson'] = eu.run_anderson_1cut(bin_net, test_input, use_intermed=True)
-    output_dict['lp'] = eu.run_lp(bin_net, test_input, use_intermed=True)
-
+    for k, method in {'decomp_2d': eu.decomp_2d_CIFAR_PARAMS,
+                      'decomp_mip': decomp_2d_mip,
+                      'optprox': eu.run_optprox,
+                      'explp': eu.run_explp,
+                      'anderson': eu.run_anderson_1cut,
+                      'lp': eu.run_lp}.items():
+        try:
+            output_dict[k] = method(bin_net, test_input)
+        except:
+            print("WARNING: %s FAILED ON EXAMPLE %s" % (k, idx))
 
 
     pprint.pprint(output_dict)

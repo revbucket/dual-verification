@@ -18,6 +18,7 @@ import experiment_utils as eu
 import argparse
 import pickle
 import pprint
+import glob
 import utilities as utils
 
 parser = argparse.ArgumentParser()
@@ -32,12 +33,15 @@ print(args)
 
 
 ####################################################
+<<<<<<< HEAD
+=======
 PREFIX = 'exp_data/mnist_deep/'
 def filenamer(idx):
     return PREFIX + str(idx) + '.pkl'
 
 
 
+>>>>>>> 694b9ee3a39694fc18df09dfed006e8b8be70e57
 
 def decomp_2d_mip(bin_net, test_input):
     start_time = time.time()
@@ -47,12 +51,21 @@ def decomp_2d_mip(bin_net, test_input):
 
 
 def write_file(idx, output_dict):
+<<<<<<< HEAD
+    PREFIX = 'exp_data/mnist_deep_'
+    with open(PREFIX + str(idx) + '.pkl', 'wb') as f:
+=======
     with utils.safe_open(filenamer(idx), 'wb') as f:
+>>>>>>> 694b9ee3a39694fc18df09dfed006e8b8be70e57
         pickle.dump(output_dict, f)
 
 
 
+<<<<<<< HEAD
+################ MAIN SCRIPT ######################################################3
+=======
 ################ MAIN SCRIPT #####git #################################################3
+>>>>>>> 694b9ee3a39694fc18df09dfed006e8b8be70e57
 
 
 
@@ -70,6 +83,17 @@ for idx in range(args.start_idx, args.end_idx):
         continue
 
 
+<<<<<<< HEAD
+    output_dict = {}
+    output_dict['decomp_2d'] = eu.decomp_2d_MNIST_PARAMS(bin_net, test_input)
+    output_dict['decomp_mip'] = decomp_2d_mip(bin_net, test_input)
+
+    output_dict['optprox'] = eu.run_optprox(bin_net, test_input, use_intermed=True)
+    output_dict['explp'] = eu.run_explp(bin_net, test_input, use_intermed=True)
+    output_dict['anderson'] = eu.run_anderson_1cut(bin_net, test_input, use_intermed=True)
+    output_dict['lp'] = eu.run_lp(bin_net, test_input, use_intermed=True)
+
+=======
     if len(glob.glob(filenamer(idx))) >= 1:
         print("Skipping example %s: file already exists" % idx)
         continue
@@ -86,6 +110,7 @@ for idx in range(args.start_idx, args.end_idx):
             output_dict[k] = method(bin_net, test_input)
         except:
             print("WARNING: %s FAILED ON EXAMPLE %s" % (k, idx))
+>>>>>>> 694b9ee3a39694fc18df09dfed006e8b8be70e57
 
 
     pprint.pprint(output_dict)

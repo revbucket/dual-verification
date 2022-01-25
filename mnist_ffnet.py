@@ -18,7 +18,6 @@ import experiment_utils as eu
 import argparse
 import pickle
 import pprint
-import utilities as utils
 
 parser = argparse.ArgumentParser()
 # usage: python -m scripts.mnist_ffnet 0 10 0.1
@@ -32,37 +31,32 @@ print(args)
 
 
 ####################################################
-PREFIX = 'exp_data/mnist_deep/'
-def filenamer(idx):
-    return PREFIX + str(idx) + '.pkl'
-
-
-
 
 def decomp_2d_mip(bin_net, test_input):
     start_time = time.time()
     decomp_obj= eu.decomp_2d_MNIST_PARAMS(bin_net, test_input, return_obj=True)
-    decomp_obj.merge_partitions(partition_dim={1:2, 3:2, 5:2, 7: 2, 9:20, 11: 1})
+    decomp_obj.merge_partitions(partition_dim={1:2, 3:2, 5:2, 7: 16, 9:1})
     return decomp_obj.lagrangian().item(), time.time() - start_time
 
 
 def write_file(idx, output_dict):
-    with utils.safe_open(filenamer(idx), 'wb') as f:
+    PREFIX = 'exp_data/mnist_ffnet_'
+    with open(PREFIX + str(idx) + '.pkl', 'wb') as f:
         pickle.dump(output_dict, f)
 
 
 
-################ MAIN SCRIPT #####git #################################################3
+################ MAIN SCRIPT ######################################################3
 
 
 
-mnist_deep = eu.load_mnist_deep_net()
+ffnet = eu.load_mnist_ffnet()
 
 for idx in range(args.start_idx, args.end_idx):
     print('Handling MNIST example %s' % idx)
 
 
-    bin_net, test_input = eu.setup_mnist_example(mnist_deep, idx, args.eps)
+    bin_net, test_input = eu.setup_mnist_example(ffnet, idx, args.eps)
 
 
     if bin_net is None:
@@ -70,22 +64,15 @@ for idx in range(args.start_idx, args.end_idx):
         continue
 
 
-    if len(glob.glob(filenamer(idx))) >= 1:
-        print("Skipping example %s: file already exists" % idx)
-        continue
-
-
     output_dict = {}
-    for k, method in {'decomp_2d': eu.decomp_2d_MNIST_PARAMS,
-                      'decomp_mip': decomp_2d_mip,
-                      'optprox': eu.run_optprox,
-                      'explp': eu.run_explp,
-                      'anderson': eu.run_anderson_1cut,
-                      'lp': eu.run_lp}.items():
-        try:
-            output_dict[k] = method(bin_net, test_input)
-        except:
-            print("WARNING: %s FAILED ON EXAMPLE %s" % (k, idx))
+    output_dict['decomp_2d'] = eu.decomp_2d_MNIST_PARAMS(bin_net, test_input)
+    output_dict['decomp_mip'] = decomp_2d_mip(bin_net, test_input)
+
+    output_dict['optprox'] = eu.run_optprox(bin_net, test_input, use_intermed=True)
+    output_dict['explp'] = eu.run_explp(bin_net, test_input, use_intermed=True)
+    output_dict['anderson'] = eu.run_anderson_1cut(bin_net, test_input, use_intermed=True)
+    output_dict['lp'] = eu.run_lp(bin_net, test_input, use_intermed=True)
+
 
 
     pprint.pprint(output_dict)

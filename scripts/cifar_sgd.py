@@ -18,6 +18,7 @@ import experiment_utils as eu
 import argparse
 import pickle
 import pprint
+import utilities as utils
 
 parser = argparse.ArgumentParser()
 # usage: python -m scripts.mnist_ffnet 0 10 0.1
@@ -31,6 +32,10 @@ print(args)
 
 
 ####################################################
+PREFIX = 'exp_data/cifar_sgd/'
+def filenamer(idx):
+    return PREFIX + str(idx) + '.pkl'
+
 
 def decomp_2d_mip(bin_net, test_input):
     start_time = time.time()
@@ -41,7 +46,7 @@ def decomp_2d_mip(bin_net, test_input):
 
 def write_file(idx, output_dict):
     PREFIX = 'exp_data/cifar_sgd_'
-    with open(PREFIX + str(idx) + '.pkl', 'wb') as f:
+    with utils.safe_open(filenamer, 'wb') as f:
         pickle.dump(output_dict, f)
 
 
