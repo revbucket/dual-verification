@@ -39,7 +39,7 @@ print(args)
 ####################################################
 PREFIX = 'exp_data/mnist_deep_all/'
 def filenamer(idx):
-    return PREFIX + str(idx) + '.pkl'
+    return PREFIX + str(idx) + 'lp.pkl'
 
 def decomp_2d_mip(bin_net, test_input, preact_bounds, time_offset):
     start_time = time.time()
@@ -99,74 +99,11 @@ for idx in range(args.start_idx, args.end_idx):
     # =           LP -- if this fails, continue                                 =
     # ===========================================================================
     output_dict = {}
-    ''' RUN LP's ON CPU-ONLY NODES
+
     try:
         output_dict['lp_all'] = eu.run_lp(bin_net, test_input, use_intermed=False)
+        pprint.pprint(output_dict)
+        write_file(idx, output_dict)
     except Exception as err:
         print("LP FAILED ON EXAMPLE %s" % idx)
-        raise err
         continue
-    '''
-
-    # ======================================
-    # =           OPT PROX STUFF           =
-    # ======================================
-
-    # A) run optprox
-
-    optprox_net, optprox_val, optprox_time = eu.run_optprox(bin_net, test_input, use_intermed=False,
-                                                            return_model=True)
-    output_dict['optprox_all'] = (optprox_val, optprox_time)
-
-    optprox_boxinfo = eu.ovalnet_to_zonoinfo(optprox_net, bin_net, test_input)
-    del optprox_net
-    eu.try_cache_clear()
-
-    # B) Run decompMip with optprox
-    output_dict['decomp_mip_optprox'] = decomp_2d_mip(bin_net, test_input, preact_bounds=optprox_boxinfo,
-                                                      time_offset=optprox_time)
-    eu.try_cache_clear()
-
-
-    # =========================================
-    # =           EXPLP 256                   =
-    # =========================================
-
-    # C) Run expLP 256
-    explp256_net, explp256_val, explp256_time = eu.run_explp(bin_net, test_input, use_intermed=False,
-                                                    return_model=True, num_iters=256)
-    output_dict['explp256_all'] = (explp256_val, explp256_time)
-
-    explp256_boxinfo = eu.ovalnet_to_zonoinfo(explp256_net, bin_net, test_input)
-    del explp256_net
-    eu.try_cache_clear()
-
-    # D) Run decompMip with explp
-    output_dict['decomp_mip_explp256'] = decomp_2d_mip(bin_net, test_input, preact_bounds=explp256_boxinfo,
-                                                      time_offset=explp256_time)
-    eu.try_cache_clear()
-
-    # ========================================
-    # =           EXPLP 512                  =
-    # ========================================
-
-    # C) Run expLP 512
-    explp512_net, explp512_val, explp512_time = eu.run_explp(bin_net, test_input, use_intermed=False,
-                                                    return_model=True, num_iters=512)
-    output_dict['explp512_all'] = (explp512_val, explp512_time)
-
-    explp512_boxinfo = eu.ovalnet_to_zonoinfo(explp512_net, bin_net, test_input)
-    del explp512_net
-    eu.try_cache_clear()
-
-    # D) Run decompMip with explp
-    output_dict['decomp_mip_explp512'] = decomp_2d_mip(bin_net, test_input, preact_bounds=explp512_boxinfo,
-                                                      time_offset=explp512_time)
-    eu.try_cache_clear()
-
-
-
-    pprint.pprint(output_dict)
-    write_file(idx, output_dict)
-
-
