@@ -237,7 +237,7 @@ def setup_mnist_example(network, ex_id, eps, show=False):
     # Sets up an example on the mnist dataset. Returns None if net is wrong on this example
     # Otherwise, returns (bin_net, Hyperbox) that we evaluate
     # By default clips into range [0,1]
-    valset = datasets.MNIST(root=train.DEFAULT_DATASET_DIR, train=False, download=False,
+    valset = datasets.MNIST(root=train.DEFAULT_DATASET_DIR, train=False, download=True,
                             transform=transforms.ToTensor())
     device = get_device()
     x, y = valset[ex_id]
@@ -336,9 +336,126 @@ def decomp_2d_MNIST_PARAMS(bin_net, test_input, return_obj=False):
     return last_val.item(), time.time() - start_time
 
 
-def decomp_2d_mip_MNIST_WIDE(bin_net, test_input):
-    # Hardcoding in the final partition size we want
+
+# ===============================================================================
+# =           CIFAR EXPERIMENT HELPERS                                          =
+# ===============================================================================
+
+
+
+
+def setup_cifar_example(network, ex_id, eps):
+    # Sets up an example on the cifar dataset. Returns None if net is wrong on this example
+    # Otherwise, returns (bin_net, Hyperbox) that we evaluate
+    # By default clips into range [0,1]
+
+    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                     std=[0.225, 0.225, 0.225])
+
+    valset = datasets.CIFAR10(root=train.DEFAULT_DATASET_DIR, train=False, download=True,
+                            transform=transforms.Compose([transforms.ToTensor(), normalize]))
+    device = get_device()
+    x, y = valset[ex_id]
+    x = x.to(device)
+
+    network.to(device)
+    pred_label = network(x[None]).squeeze().max(dim=0)[1]
+
+    if y != pred_label.item():
+        return None, None
+    bin_net = network.binarize(y, (y+1) % 10).to(device)
+
+    test_input = Hyperbox.linf_box(x.flatten(), eps)
+    bin_net(x[None])
+    return bin_net, test_input
+
+
+def load_cifar_sgd(pth=None):
+    model = nn.Sequential(
+        nn.Conv2d(3, 16, 4, stride=2, padding=1),
+        nn.ReLU(),
+        nn.Conv2d(16, 32, 4, stride=2, padding=1),
+        nn.ReLU(),
+        nn.Flatten(),
+        nn.Linear(32*8*8,100),
+        nn.ReLU(),
+        nn.Linear(100, 10)
+    )
+
+    ffnet = FFNet(model)
+
+    if pth is None:
+        pth = os.path.join(dir_path, 'networks/cifar_sgd.pth')
+
+    ffnet.load_state_dict(torch.load(pth, map_location='cpu'))
+    ffnet(torch.rand(1,3,32,32))# sets shapes
+    return ffnet
+
+
+def load_cifar_madry(pth=None):
+    model = nn.Sequential(
+        nn.Conv2d(3, 16, 4, stride=2, padding=1),
+        nn.ReLU(),
+        nn.Conv2d(16, 32, 4, stride=2, padding=1),
+        nn.ReLU(),
+        nn.Flatten(),
+        nn.Linear(32*8*8,100),
+        nn.ReLU(),
+        nn.Linear(100, 10)
+    )
+
+    ffnet = FFNet(model)
+
+    if pth is None:
+        pth = os.path.join(dir_path, 'networks/cifar_madry.pth')
+
+    ffnet.load_state_dict(torch.load(pth, map_location='cpu'))
+    ffnet(torch.rand(1,3,32,32))# sets shapes
+    return ffnet
+
+def load_mnist_wide_net(pth=None):
+    sequential = nn.Sequential(nn.Conv2d(1, 16, 4, stride=2, padding=1, bias=True), nn.ReLU(),
+                               nn.Conv2d(16, 32, 4, stride=2, padding=1, bias=True), nn.ReLU(),
+                               nn.Flatten(),
+                               nn.Linear(32 * 7 * 7, 100, bias=True), nn.ReLU(),
+                               nn.Linear(100, 10, bias=True))
+
+    ffnet = FFNet(sequential)
+    if pth is None:
+        pth = os.path.join(dir_path, 'networks/mnist_wide.pth')
+    ffnet.load_state_dict(torch.load(pth, map_location='cpu'))
+    ffnet(torch.rand(1,1,28,28))# sets shapes
+    return ffnet
+
+
+
+def decomp_2d_CIFAR_PARAMS(bin_net, test_input, return_obj=False):
+    device = get_device()
+    bin_net.to(device)
+    test_input.to(device)
+
     start_time = time.time()
-    decomp_obj= decomp_2d_MNIST_PARAMS(bin_net, test_input, return_obj=True)
-    decomp_obj.merge_partitions(partition_dim={1:2, 3:2, 5:20, 7: 2})
-    return decomp_obj.lagrangian().item(), time.time() - start_time
+    # Use best of KW/Naive to inform zonos
+    lbs, ubs = get_best_naive_kw(bin_net, test_input)
+    hboxes = [Hyperbox(lb.flatten(), ub.flatten()) for (lb, ub) in zip(lbs, ubs)]
+    preact_bounds = BoxInformedZonos(bin_net, test_input, box_range=hboxes).compute()
+
+    # Define partition object
+    input_shapes = [l.input_shape for l in bin_net.net]
+
+    partition_obj = PartitionGroup(None, style='fixed_dim', partition_rule='spatial',
+                                   partition_dim=2, input_shapes=input_shapes)
+
+    # Main dual object and ascent procedure
+    decomp = DecompDual2(bin_net, test_input, Zonotope, 'partition', zero_dual=False,
+                         partition=partition_obj, preact_bounds=preact_bounds)
+
+    optim_obj = optim.Adam(decomp.parameters(), lr=2.5e-3)
+    scheduler = optim.lr_scheduler.MultiplicativeLR(optim_obj, lambda epoch: 0.5, last_epoch=- 1, verbose=False)
+    for i in range(5):
+        last_val = decomp.dual_ascent(200, verbose=50, optim_obj=optim_obj, iter_start=i * 200)
+        scheduler.step()
+
+    if return_obj:
+        return decomp
+    return last_val.item(), time.time() - start_time
