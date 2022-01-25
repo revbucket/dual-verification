@@ -24,4 +24,4 @@ for f in sorted(root.glob("[0-9]*.pkl"), key=lambda f: int(f.stem)):
 
 print(df)
 
-df.to_pickle(root / f"{root.stem}.pkl")
+df.to_hdf(root.parent / f"{root.stem}.hdf5", key="data")
