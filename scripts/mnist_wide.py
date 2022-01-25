@@ -18,7 +18,8 @@ import experiment_utils as eu
 import argparse
 import pickle
 import pprint
-import utilities as utis
+import glob
+import utilities as utils
 
 parser = argparse.ArgumentParser()
 # usage: python -m scripts.mnist_ffnet 0 10 0.1
