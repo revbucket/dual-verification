@@ -100,7 +100,12 @@ for idx in range(args.start_idx, args.end_idx):
     # ===========================================================================
     output_dict = {}
 
-
+    try:
+        output_dict['lp_all'] = eu.run_lp(bin_net, test_input, use_intermed=False)
+    except Exception as err:
+        print("LP FAILED ON EXAMPLE %s" % idx)
+        raise err
+        continue
     # ======================================
     # =           OPT PROX STUFF           =
     # ======================================
@@ -116,8 +121,6 @@ for idx in range(args.start_idx, args.end_idx):
     eu.try_cache_clear()
 
     # B) Run decompMip with optprox
-    output_dict['decomp_optprox'] = decomp_2d_mip(bin_net, test_input, optprox_boxinfo, optprox_time)
-
     output_dict['decomp_mip_optprox'] = decomp_2d_mip(bin_net, test_input, preact_bounds=optprox_boxinfo,
                                                       time_offset=optprox_time)
     eu.try_cache_clear()
@@ -160,15 +163,6 @@ for idx in range(args.start_idx, args.end_idx):
     eu.try_cache_clear()
 
 
-
-    '''
-    try:
-        output_dict['lp_all'] = eu.run_lp(bin_net, test_input, use_intermed=False)
-    except Exception as err:
-        print("LP FAILED ON EXAMPLE %s" % idx)
-        raise err
-        continue
-    '''
 
     pprint.pprint(output_dict)
     write_file(idx, output_dict)
