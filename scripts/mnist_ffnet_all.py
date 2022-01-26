@@ -37,7 +37,7 @@ print(args)
 
 
 ####################################################
-PREFIX = 'exp_data/mnist_ffnet_all/'
+PREFIX = 'exp_data/mnist_ffnet_all_RANDOMPART/'
 def filenamer(idx):
     return PREFIX + str(idx) + '.pkl'
 
@@ -46,7 +46,7 @@ def decomp_2d_mip(bin_net, test_input, preact_bounds, time_offset):
     get_time = lambda: time.time() - start_time + time_offset
 
     # Set up the decomp object
-    partition_obj = PartitionGroup(None, style='fixed_dim', partition_rule='similarity',
+    partition_obj = PartitionGroup(None, style='fixed_dim', partition_rule='random',
                                    partition_dim=2)
 
     decomp = DecompDual2(bin_net, test_input, Zonotope, 'partition', zero_dual=False,
