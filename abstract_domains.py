@@ -799,6 +799,7 @@ class Zonotope(AbstractDomain):
         Returns
             (opt_val, argmin x, argmin y)
         """
+        eps = 1e-6 #machine epsilon for extra tolerance
         mip_dict = self._encode_mip2(box_bounds=box_bounds)
         model = mip_dict['model']
 
@@ -814,9 +815,14 @@ class Zonotope(AbstractDomain):
             lbs = torch.max(self.lbs, box_bounds.lbs)
             ubs = torch.min(self.ubs, box_bounds.ubs)
 
+        # Weird block to check for numerical issues
+        lbs -= eps
+        ubs += eps
+
+        assert torch.all(lbs <= ubs), "LB/UB numerical issues!"
 
 
-        # Now add ReLU constraints, using the big-M encoding
+        # Now add ReLU constraints, using the PLANET encoding
         off_neurons = (ubs < 0)
         on_neurons = (lbs >= 0)
         on_idxs = on_neurons.nonzero().flatten().cpu()
@@ -826,16 +832,16 @@ class Zonotope(AbstractDomain):
         zs = model.addMVar(len(unc_idxs), vtype=gb.GRB.BINARY, name='z')
 
         if len(unc_idxs) > 1:
-            model.addConstr(relu_vars >= xs[unc_idxs])
+            model.addConstr(relu_vars >= xs[unc_idxs] - eps)
             # Maybe diagflats aren't best here...
-            model.addConstr(relu_vars <= np.diagflat(ubs[unc_idxs].detach().cpu().numpy()) @ zs)
+            model.addConstr(relu_vars <= np.diagflat(ubs[unc_idxs].detach().cpu().numpy()) @ zs + eps)
             model.addConstr(relu_vars + lbs[unc_idxs].squeeze().detach().cpu().numpy() <=
-                        xs[unc_idxs] + np.diagflat(lbs[unc_idxs].detach().cpu().numpy()) @ zs)
+                        xs[unc_idxs] + np.diagflat(lbs[unc_idxs].detach().cpu().numpy()) @ zs + eps)
         else:
             for i, idx in enumerate(unc_idxs):
-                model.addConstr(relu_vars[i] >= xs[idx])
-                model.addConstr(relu_vars[i] <= ubs[idx].item() * zs[i])
-                model.addConstr(relu_vars[i] <= xs[idx] - (1- zs[i]) * lbs[idx].item())
+                model.addConstr(relu_vars[i] >= xs[idx] - eps)
+                model.addConstr(relu_vars[i] <= ubs[idx].item() * zs[i] + eps)
+                model.addConstr(relu_vars[i] <= xs[idx] - (1- zs[i]) * lbs[idx].item() + eps)
 
 
         model.update()
@@ -873,14 +879,18 @@ class Zonotope(AbstractDomain):
             # In the case that |unc_idxs| == 1
             model.setObjective(lin_obj @ xs + relu_obj * relu_vars, gb.GRB.MINIMIZE)
 
-        if start == 'prev' and self.past_rp_solution is not None:
+        if False: #start == 'prev' and self.past_rp_solution is not None:
             for var, past_val in zip(model.getVars(), self.past_rp_solution):
                 var.Start = past_val
 
         model.update()
         model.optimize()
-        self.past_rp_solution = [_.X for _ in model.getVars()]
 
+        try:
+            self.past_rp_solution = [_.X for _ in model.getVars()]
+        except Exception as err:
+            print("WEIRD GUROBI BUG: MODEL STATUS ", model.Status)
+            raise err
 
         xvals = torch.tensor([_.x for _ in xs], device=self.center.device)
         yvals = torch.tensor([_.x for _ in ys], device=self.center.device)

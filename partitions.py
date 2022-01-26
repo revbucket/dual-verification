@@ -378,8 +378,16 @@ class PartitionGroup():
 		#### MULTITHREADING BLOCK
 		def subproblem(group, subzono):
 			box_bounds = None if ((self.box_info or {}).get(i) is None) else self.box_info[i][group]
-			min_val, sub_argmin, _, _ = subzono.solve_relu_mip(c1[group], c2[group], apx_params=gurobi_params,
-				                                               start=start, box_bounds=box_bounds)
+			try:
+				min_val, sub_argmin, _, _ = subzono.solve_relu_mip(c1[group], c2[group], apx_params=gurobi_params,
+					                                               start=start, box_bounds=box_bounds)
+			except:
+				# Some weird voodoo that sometimes gurobi needs to work...
+				subzono.relu_prog_model = None
+				subzono.solve_relu_mip(torch.zeros_like(subzono.center), torch.zeros_like(subzono.center),
+									   apx_params=gurobi_params, box_bounds=box_bounds)
+				min_val, sub_argmin, _, _ = subzono.solve_relu_mip(c1[group], c2[group], apx_params=gurobi_params,
+					                                               start=start, box_bounds=box_bounds)
 			return min_val, sub_argmin, group
 
 

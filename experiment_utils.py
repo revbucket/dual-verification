@@ -232,6 +232,7 @@ def run_lp(bin_net, test_input, use_intermed=True):
         lp_and_grb_net.define_linear_approximation(domain[0], n_threads=4)
         ub = lp_and_grb_net.upper_bounds[-1]
         lb = lp_and_grb_net.lower_bounds[-1]
+
         print(ub, lb)
     else:
 
