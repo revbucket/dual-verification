@@ -15,6 +15,7 @@ assert root.exists()
 algs = set()
 props = ["bound", "time"]
 data = {}
+old_algs = {"decomp_optprox"}
 
 for f in root.glob("[0-9]*.pkl"):
     i = int(re.match("[0-9]+", f.stem).group())
@@ -22,13 +23,17 @@ for f in root.glob("[0-9]*.pkl"):
     data.setdefault(i, {}).update(run_data)
     algs.update(run_data.keys())
 
+algs.difference_update(old_algs)
 print(sorted(algs))
 
 df = pd.DataFrame(columns=list(it.product(algs, props)))
 
 for i in sorted(data.keys()):
     df.loc[i] = {
-        (alg, col): t[j] for alg, t in data[i].items() for j, col in enumerate(props)
+        (alg, col): t[j]
+        for alg, t in data[i].items()
+        if alg not in old_algs
+        for j, col in enumerate(props)
     }
 
 print(df)
