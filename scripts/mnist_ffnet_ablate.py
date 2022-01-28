@@ -10,7 +10,7 @@ import torch.optim as optim
 from partitions import PartitionGroup
 from dual_decompose2 import DecompDual2
 from abstract_domains import Zonotope, Hyperbox
-from neural_nets import BoxInformedZonos
+from neural_nets import BoxInformedZonos, PreactBounds
 
 parser = argparse.ArgumentParser()
 # usage: python -m scripts.mnist_ffnet 0 10 0.1
@@ -35,22 +35,24 @@ def write_file(idx, output_dict):
         pickle.dump(output_dict, f)
 
 
-def ablate(bin_net, test_input, use_optprox=False):
+def ablate(bin_net, test_input, preact_choice):
+    assert preact_choice in ['deepz', 'deepzIBP', 'BDD']
     output = {}
-    suffix = ''
+    suffix = '_' + preact_choice
     start_time = time.time()
     get_time = lambda: time.time() - start_time
 
     # Get init bounds
     preact_bounds = None
-    if use_optprox:
-        suffix = '_optprox'
+    if preact_choice == 'BDD':
         optprox_all = eu.run_optprox(bin_net, test_input, use_intermed=False, return_model=True)[0]
         preact_bounds = eu.ovalnet_to_zonoinfo(optprox_all, bin_net, test_input)
-    else:
+    elif preact_choice == 'deepzIBP':
         lbs, ubs = eu.get_best_naive_kw(bin_net, test_input)
         hboxes = [Hyperbox(lb.flatten(), ub.flatten()) for (lb, ub) in zip(lbs, ubs)]
         preact_bounds = BoxInformedZonos(bin_net, test_input, box_range=hboxes).compute()
+    elif preact_choice == 'deepz':
+        preact_bounds = PreactBounds(bin_net, test_input, Zonotope).compute()
 
     init_bound = preact_bounds.bounds[-1].lbs[0].item()
     output['decomp2d_init%s' % suffix] = (init_bound, get_time())
@@ -100,16 +102,18 @@ for idx in range(args.start_idx, args.end_idx):
 
 
     # RUN LP
-    output_dict['lp'] = eu.run_lp(bin_net, test_input, use_intermed=False)
-
+    output_dict['lp_all'] = eu.run_lp(bin_net, test_input, use_intermed=False)
+    output_dict['lp_single'] = eu.run_lp(bin_net, test_input, use_intermed=True)
 
     # Now run Optprox and optprox all
-    output_dict['optprox'] = eu.run_optprox(bin_net, test_input, use_intermed=True)
     output_dict['optprox_all'] = eu.run_optprox(bin_net, test_input, use_intermed=False)
+    output_dict['optprox_single'] = eu.run_optprox(bin_net, test_input, use_intermed=True)
 
     # And then run without the optprox bounds
-    output_dict.update(ablate(bin_net, test_input, use_optprox=False))
-    output_dict.update(ablate(bin_net, test_input, use_optprox=True))
+    for choice in ['deepz', 'deepzIBP', 'BDD']:
+        output_dict.update(ablate(bin_net, test_input, preact_choice=choice))
+
+
 
 
 
