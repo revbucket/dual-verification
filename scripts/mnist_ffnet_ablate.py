@@ -35,12 +35,13 @@ def write_file(idx, output_dict):
         pickle.dump(output_dict, f)
 
 
-
 def ablate(bin_net, test_input, use_optprox=False):
     output = {}
     suffix = ''
     start_time = time.time()
     get_time = lambda: time.time() - start_time
+
+    # Get init bounds
     preact_bounds = None
     if use_optprox:
         suffix = '_optprox'
@@ -51,6 +52,11 @@ def ablate(bin_net, test_input, use_optprox=False):
         hboxes = [Hyperbox(lb.flatten(), ub.flatten()) for (lb, ub) in zip(lbs, ubs)]
         preact_bounds = BoxInformedZonos(bin_net, test_input, box_range=hboxes).compute()
 
+    init_bound = preact_bounds.bounds[-1].lbs[0].item()
+    output['decomp2d_init%s' % suffix] = (init_bound, get_time())
+
+
+    # Run dual ascent
     partition_obj = PartitionGroup(None, style='fixed_dim', partition_rule='similarity',
                                    partition_dim=2)
     decomp = DecompDual2(bin_net, test_input, Zonotope, 'partition', zero_dual=False,
@@ -62,20 +68,11 @@ def ablate(bin_net, test_input, use_optprox=False):
         last_val = decomp.dual_ascent(100, verbose=200, optim_obj=optim_obj, iter_start=i * 100)
         scheduler.step()
 
-    output['decomp2d%s' % suffix] = (last_val.item() , get_time())
+    output['decomp2d_iter%s' % suffix] = (last_val.item() , get_time())
 
+    # Do smallMIP
     decomp.merge_partitions(partition_dim={1:2, 3:2, 5: 2, 7: 32, 9:1})
-    output['decomp2d_smallMIP%s' % suffix] = (decomp.lagrangian().item(), get_time())
-
-    optim_obj = optim.Adam(decomp.parameters(), lr=5e-3)
-    scheduler = optim.lr_scheduler.MultiplicativeLR(optim_obj, lambda epoch: 0.2, last_epoch=- 1, verbose=False)
-    for i in range(2):
-        last_val = decomp.dual_ascent(25, verbose=True, optim_obj=optim_obj, iter_start=i * 25)
-        scheduler.step()
-    output['decomp2d_MIPascent%s' % suffix] = (last_val.item(), get_time())
-
-    decomp.merge_partitions(partition_dim={1:16, 3:16,5:32, 7: 32, 9: 1})
-    output['decomp2d_bigMIP%s' % suffix] = (decomp.lagrangian().item(), get_time())
+    output['decomp2d_eval%s' % suffix] = (decomp.lagrangian().item(), get_time())
     return output
 
 
@@ -107,13 +104,14 @@ for idx in range(args.start_idx, args.end_idx):
 
 
     # Now run Optprox and optprox all
-
     output_dict['optprox'] = eu.run_optprox(bin_net, test_input, use_intermed=True)
     output_dict['optprox_all'] = eu.run_optprox(bin_net, test_input, use_intermed=False)
 
     # And then run without the optprox bounds
     output_dict.update(ablate(bin_net, test_input, use_optprox=False))
     output_dict.update(ablate(bin_net, test_input, use_optprox=True))
+
+
 
 
     pprint.pprint(output_dict)
