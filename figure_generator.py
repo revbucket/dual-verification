@@ -19,8 +19,9 @@ import pandas as pd
 import seaborn as sns
 from matplotlib import pyplot as plt
 import matplotlib as mpl
-import tikzplotlib
+import numpy as np
 import subprocess
+import re
 
 # helper to melt the first level of a MultiIndex
 def melt1(df, name="alg"):
@@ -30,12 +31,34 @@ def melt1(df, name="alg"):
         .rename_axis(name)
         .reset_index())
 
-def diff1(df, alg_ref):
+def diff1(df, alg_ref, drop=True):
     df = df.reindex(sorted(df.columns), axis=1)
-    df2 = pd.DataFrame(columns=df.columns.drop(alg_ref, level=0))
+    cols = df.columns
+    if drop:
+        cols = cols.drop(alg_ref, level=0)
+    df2 = pd.DataFrame(columns=cols)
     for (alg, prop) in df2.columns:
         df2[alg, prop] = df[alg, prop] - df[alg_ref, prop] 
     return df2
+
+def custom_round(mu, sigma, n, shift=0):
+    digits = int(np.ceil(-np.log10(12.44/np.sqrt(n)))) + shift
+    out = round(mu, digits), round(sigma, digits)
+    if np.isclose(out, 0.0, atol=1e-9).any() and shift < 4:
+        return custom_round(mu, sigma, n, shift+1)
+    return out
+
+def drop_outliers(series, r=5):
+    Q1 = series.quantile(0.25)
+    Q3 = series.quantile(0.75)
+    IQR = Q3 - Q1
+    return series[~((series < (Q1 - r * IQR)) |(series > (Q3 + r * IQR)))]
+
+def drop_outliers2(df, r=5):
+    Q1 = df.quantile(0.25)
+    Q3 = df.quantile(0.75)
+    IQR = Q3 - Q1
+    return df[~((df < (Q1 - r * IQR)) |(df > (Q3 + r * IQR))).any(axis=1)]
 
 # %config InlineBackend.print_figure_kwargs={'facecolor' : "w"}
 
@@ -81,8 +104,8 @@ palette = {k: colors[i] for k, i in {
     "explp": 4,
     "explp256_all": 3,
     "explp512_all": 2,
-    "decomp_2d": 1, 
-    "decomp_mip": 0,
+    "decomp_2d": 0,
+    "decomp_mip": 1,
     "decomp_mip_explp256": 0,
     "decomp_mip_explp512": 1,
     "decomp_mip_optprox": 6
@@ -92,16 +115,16 @@ name_subs = {
     "optprox": "BDD+",
     "optprox_all": "BDD+",
     "explp": "AS",
-    "explp256_all": "AS 256",
-    "explp512_all": "AS 512",
+    "explp256_all": "AS256",
+    "explp512_all": "AS512",
     "anderson": "Anderson",
     "lp": "LP",
     "lp_all": "LP",
-    "decomp_2d": "ZD-2D",
-    "decomp_mip": "ZD-MIP",
-    "decomp_mip_optprox": "BDD+ → ZD",
-    "decomp_mip_explp256": "AS 256 → ZD",
-    "decomp_mip_explp512": "AS 512 → ZD"
+    "decomp_2d": r"\textbf{ZD-2D}",
+    "decomp_mip": r"\textbf{ZD-MIP}",
+    "decomp_mip_optprox": r"\textbf{BDD+ → ZD}",
+    "decomp_mip_explp256": r"\textbf{AS256 → ZD}",
+    "decomp_mip_explp512": r"\textbf{AS512 → ZD}"
 }
 
 experiment_subs = {
@@ -130,13 +153,13 @@ bounds = [
     (-50, 10), 
     (-100, 5), 
     (-40, 10),
-    (-40, 10),
-    (-75, 10),
+    (-45, 7),
+    (-75, 7),
     (-40, 15)
 ]
 for (exp, name), (xmin, xmax) in zip(experiment_subs.items(), bounds):
     df = pd.read_hdf(f"exp_data/{exp}.hdf5")
-    plt.figure(figsize=(3.5,2.5))
+    plt.figure(figsize=(3.5,2.0))
     meds = df.xs('bound', axis=1, level=1).median()
     ax = sns.ecdfplot(
         x="bound",
@@ -150,7 +173,7 @@ for (exp, name), (xmin, xmax) in zip(experiment_subs.items(), bounds):
         l.set_zorder(10 + len(ax.lines) - i)
     plt.xlim(xmin, xmax)
     plt.xlabel("Bound")
-    plt.title(f"CDF plot of bounds ({name})")
+#     plt.title(f"CDF plot of bounds ({name})")
     fix_legend(ax.get_legend())
     savefig(f"{exp}_cdf")
     plt.show()
@@ -168,7 +191,7 @@ bounds = [
 ]
 for (exp, name), base, (xmin, xmax) in zip(experiment_subs.items(), baseline, bounds):
     df = pd.read_hdf(f"exp_data/{exp}.hdf5")
-    plt.figure(figsize=(3.5,2.5))
+    plt.figure(figsize=(3.5,2.0))
     diffs = diff1(df, base) #.drop("decomp_2d", axis=1, level=0)
     means = diffs.xs('bound', axis=1, level=1).mean()
     ax = sns.kdeplot(
@@ -181,7 +204,7 @@ for (exp, name), base, (xmin, xmax) in zip(experiment_subs.items(), baseline, bo
     )
     ax.axvline([0], linewidth=1, color='grey', linestyle="--", label=name_subs[base])
     plt.xlabel(f"Bound Difference (other − reference)")
-    plt.title(f"{name_subs[base]} vs. Others ({name})")
+#     plt.title(f"{name_subs[base]} vs. Others ({name})")
     plt.tick_params(axis='y', left=False, labelleft=False)
     plt.xlim(xmin, xmax)
     fix_legend(ax.get_legend())
