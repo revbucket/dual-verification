@@ -38,7 +38,7 @@ def diff1(df, alg_ref, drop=True):
         cols = cols.drop(alg_ref, level=0)
     df2 = pd.DataFrame(columns=cols)
     for (alg, prop) in df2.columns:
-        df2[alg, prop] = df[alg, prop] - df[alg_ref, prop] 
+        df2[alg, prop] = df[alg, prop] - df[alg_ref, prop]
     return df2
 
 def custom_round(mu, sigma, n, shift=0):
@@ -149,9 +149,9 @@ mnist_ffnet
 
 # %%
 bounds = [
-    (-50, 5), 
-    (-50, 10), 
-    (-100, 5), 
+    (-50, 5),
+    (-50, 10),
+    (-100, 5),
     (-40, 10),
     (-45, 7),
     (-75, 7),
@@ -181,9 +181,9 @@ for (exp, name), (xmin, xmax) in zip(experiment_subs.items(), bounds):
 # %%
 baseline = ["decomp_mip"]*3 + ["decomp_mip_explp256"]*3 + ["decomp_mip"]
 bounds = [
-    (-20, 1), 
-    (-27, 0), 
-    (-60, 3), 
+    (-20, 1),
+    (-27, 0),
+    (-60, 3),
     (-15, 2),
     (-15, 4),
     (-25, 4),
@@ -210,4 +210,89 @@ for (exp, name), base, (xmin, xmax) in zip(experiment_subs.items(), baseline, bo
     fix_legend(ax.get_legend())
     savefig(f"{exp}_diff")
     plt.show()
+
+# %%
+mnist_ffnet_ablate = drop_outliers2(pd.read_hdf("exp_data/mnist_ffnet_ablate.hdf5"))
+mfad = diff1(mnist_ffnet_ablate, "lp_single")
+
+stages = ["init", "iter", "eval"]
+stages_display = ['Init', 'Iter', 'Eval']
+errors = True
+
+inits = ['deepz', 'deepzIBP', 'BDD']
+primals = ['DeepZ', 'DeepZ + IBP', 'DeepZ + BDD+']
+index = []
+for i, p in enumerate(primals):
+    index.append(p)
+    index.append(f"R{i}")
+df = pd.DataFrame(columns=stages_display, index=index)
+
+for stage, disp in zip(stages, stages_display):
+    for j, I in enumerate(index):
+        init = inits[j//2]
+        if not I.startswith("R"):
+            data = mfad[f"decomp2d_{stage}_{init}"].bound
+        else:
+            data = mnist_ffnet_ablate[f"decomp2d_{stage}_{init}"].time
+#         data = drop_outliers(data)
+        mu, sigma = custom_round(data.mean(), data.std(), len(data))
+        df.loc[I, disp] = f"{mu}"
+        if errors:
+            df.loc[I, disp] = rf"\({mu} \pm {sigma}\)"
+
+out = df.style.to_latex(
+    hrules=True,
+    position_float="centering",
+    position="h",
+    column_format="lrrr"
+)
+
+out = out.replace(" &", r"Init\textbackslash{}Phase &", 1)
+for i in range(len(inits)+1):
+    out = out.replace(f"R{i}", "Runtime (s)")
+out = re.sub(r"(Runtime \(s\) .*)", r"\1\\midrule", out)
+out = out.replace("\\midrule\n\\bottomrule", "\n\\bottomrule")
+
+print(out)
+# (mnist_ffnet_ablate.decomp2d_eval.bound.mean()
+#  - mnist_ffnet_ablate.lp.bound.mean())
+
+
+# %%
+def generate_table(experiments, prop, ref=None, drop=False):
+    names = [
+        experiment_subs[exp].replace(",", "").replace(" All Layers", "")
+        for exp in experiments
+    ]
+
+    dfs = [pd.read_hdf(f"exp_data/{exp}.hdf5") for exp in experiments]
+    if ref:
+        dfs = [diff1(df, ref, drop) for df in dfs]
+    n = len(dfs[0])
+    methods = set()
+    for df in dfs:
+        methods.update(df.columns.droplevel(1))
+
+    data = {k: [(df[k, prop].mean(), df[k, prop].std()) for df in dfs] for k in methods}
+    mean_times = {k: sum(t[0] for t in v) for k, v in data.items()}
+
+    order = sorted(methods, key=lambda m: mean_times[m])
+    index = [name_subs[a] for a in order]
+
+    df = pd.DataFrame(columns=names, index=index)
+    for i, m in zip(index, order):
+        df.loc[i] = [r"\({} \pm {}\)".format(*custom_round(*t. n)) for t in data[m]]
+    print(df.style.to_latex(
+        hrules=True,
+        position_float="centering",
+        position="h",
+        column_format="l" + "r" * len(experiments)
+    ).replace(" &", r"Alg\textbackslash{}Net &", 1))
+
+generate_table(["mnist_deep", "cifar_sgd"], "time")
+generate_table(["mnist_deep_all", "mnist_wide_all"], "time")
+generate_table(["mnist_ffnet", "mnist_deep", "mnist_wide", "cifar_sgd"], "time")
+generate_table(["mnist_ffnet_all", "mnist_deep_all", "mnist_wide_all"], "time")
+generate_table(["mnist_ffnet", "mnist_deep", "mnist_wide", "cifar_sgd"], "bound", ref="decomp_2d")
+generate_table(["mnist_ffnet_all", "mnist_deep_all", "mnist_wide_all"], "bound", ref="decomp_mip_optprox")
 
