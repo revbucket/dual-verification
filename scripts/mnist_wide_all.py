@@ -21,7 +21,7 @@ import utilities as utils
 
 import torch.optim as optim
 from partitions import PartitionGroup
-from dual_decompose2 import DecompDual2
+from dual_decompose import DecompDual
 from abstract_domains import Zonotope
 
 parser = argparse.ArgumentParser()
@@ -51,7 +51,7 @@ def decomp_2d_mip(bin_net, test_input, preact_bounds, time_offset):
     partition_obj = PartitionGroup(None, style='fixed_dim', partition_rule='spatial',
                                    partition_dim=2, input_shapes=input_shapes)
 
-    decomp = DecompDual2(bin_net, test_input, Zonotope, 'partition', zero_dual=False,
+    decomp = DecompDual(bin_net, test_input, Zonotope, 'partition', zero_dual=False,
                          preact_bounds=preact_bounds, partition=partition_obj)
 
     # Run for 2k iterations

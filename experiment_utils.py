@@ -30,9 +30,7 @@ import copy
 
 # My stuff
 from abstract_domains import Hyperbox, Zonotope, Polytope
-import dual_decompose as dd
-from dual_decompose2 import DecompDual2
-import dual_naive as dn
+from dual_decompose import DecompDual
 from lp_relaxation import LPRelax
 from mip_verify import MIPVerify
 from neural_nets import FFNet, PreactBounds, KWBounds, BoxInformedZonos
@@ -342,7 +340,7 @@ def decomp_2d_MNIST_PARAMS(bin_net, test_input, return_obj=False, preact_bounds=
                                    partition_dim=2)
 
     # Main dual object and ascent procedure
-    decomp = DecompDual2(bin_net, test_input, Zonotope, 'partition', zero_dual=False,
+    decomp = DecompDual(bin_net, test_input, Zonotope, 'partition', zero_dual=False,
                          partition=partition_obj, preact_bounds=preact_bounds)
 
     optim_obj = optim.Adam(decomp.parameters(), lr=1e-2)
@@ -470,7 +468,7 @@ def decomp_2d_CIFAR_PARAMS(bin_net, test_input, return_obj=False, preact_bounds=
                                    partition_dim=2, input_shapes=input_shapes)
 
     # Main dual object and ascent procedure
-    decomp = DecompDual2(bin_net, test_input, Zonotope, 'partition', zero_dual=False,
+    decomp = DecompDual(bin_net, test_input, Zonotope, 'partition', zero_dual=False,
                          partition=partition_obj, preact_bounds=preact_bounds)
 
     optim_obj = optim.Adam(decomp.parameters(), lr=2.5e-3)

@@ -892,6 +892,13 @@ class Zonotope(AbstractDomain):
             print("WEIRD GUROBI BUG: MODEL STATUS ", model.Status)
             raise err
 
+        # Debug block!
+        if model.Status == 2 and abs(model.ObjBound - model.objVal) > 1e-4:
+            print("WEIRD ISSUE HERE", model.Status, model.ObjBound - model.objVal)
+
+        #/debug block
+
+
         xvals = torch.tensor([_.x for _ in xs], device=self.center.device)
         yvals = torch.tensor([_.x for _ in ys], device=self.center.device)
 

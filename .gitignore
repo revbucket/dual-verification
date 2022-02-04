@@ -4,3 +4,6 @@ __pycache__
 /migrated
 /nbconfig
 /.ipynb_checkpoints
+/notebooks
+/pickles
+/hdf5s

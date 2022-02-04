@@ -8,7 +8,7 @@ import utilities as utils
 
 import torch.optim as optim
 from partitions import PartitionGroup
-from dual_decompose2 import DecompDual2
+from dual_decompose import DecompDual
 from abstract_domains import Zonotope, Hyperbox
 from neural_nets import BoxInformedZonos, PreactBounds
 
@@ -61,7 +61,7 @@ def ablate(bin_net, test_input, preact_choice):
     # Run dual ascent
     partition_obj = PartitionGroup(None, style='fixed_dim', partition_rule='similarity',
                                    partition_dim=2)
-    decomp = DecompDual2(bin_net, test_input, Zonotope, 'partition', zero_dual=False,
+    decomp = DecompDual(bin_net, test_input, Zonotope, 'partition', zero_dual=False,
                          partition=partition_obj, preact_bounds=preact_bounds)
 
     optim_obj = optim.Adam(decomp.parameters(), lr=1e-2)
