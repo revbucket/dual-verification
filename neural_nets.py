@@ -111,6 +111,38 @@ class FFNet(nn.Module):
         new_net = nn.Sequential(*list(self.net[:-1]) + [new_linear_layer])
         return FFNet(new_net, self.dtype)
 
+    def elide(self, i):
+        """ Replaces the output layer with logit diffences.
+            output[j] := this.output[i] - this.output[j]
+            (so lower bounds >= 0 imply robustness)
+        """
+        final_linear = self.net[-1]
+        new_linear_layer = nn.Linear(in_features=final_linear.in_features,
+                                     out_features=final_linear.out_features - 1,
+                                     device=final_linear.weight.device)
+
+        running_idx = 0
+        for j in range(final_linear.out_features):
+            if i == j:
+                continue
+            new_linear_layer.weight[running_idx].data = (final_linear.weight[i] - final_linear.weight[j]).data
+            running_idx += 1
+
+
+        if final_linear.bias != None:
+            running_idx = 0
+            for j in range(final_linear.out_features):
+                if i == j:
+                    continue
+                new_linear_layer.bias[running_idx].data = (final_linear.bias[i] - final_linear.bias[j]).data
+                running_idx += 1
+        else:
+            new_linear_layer.bias.data.zero_()
+
+
+        new_linear_layer.input_shape = torch.Size([new_linear_layer.in_features])
+        new_net = nn.Sequential(*list(self.net[:-1]) + [new_linear_layer])
+        return FFNet(new_net, self.dtype)
 
     # ====================================================================
     # =           Evaluation/Forward pass stuff                          =

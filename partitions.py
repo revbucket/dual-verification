@@ -7,6 +7,7 @@ import utilities as utils
 import torch.nn as nn
 import math
 import joblib
+import copy
 import numpy as np
 from abstract_domains import Zonotope
 
@@ -368,25 +369,27 @@ class PartitionGroup():
 		if self.subzonos.get(i) is not None:
 			parts = self.subzonos[i]
 		else:
-
 			parts = self.order_sweep([_[1] for _ in self.base_zonotopes[i].partition(groups)])
 
 		obj_val = 0.0
-		argmin = torch.zeros_like(zono.center)
+
 
 
 		#### MULTITHREADING BLOCK
-		def subproblem(group, subzono):
+		def subproblem(group, subzono, all_c1=c1, all_c2=c2):
 			box_bounds = None if ((self.box_info or {}).get(i) is None) else self.box_info[i][group]
+			c1 = all_c1.index_select(-1, torch.tensor(group, device=all_c1.device).long())
+			c2 = all_c2.index_select(-1, torch.tensor(group, device=all_c2.device).long())
+
 			try:
-				min_val, sub_argmin, _, _ = subzono.solve_relu_mip(c1[group], c2[group], apx_params=gurobi_params,
+				min_val, sub_argmin, _, _ = subzono.solve_relu_mip(c1, c2, apx_params=gurobi_params,
 					                                               start=start, box_bounds=box_bounds)
 			except:
 				# Some weird voodoo that sometimes gurobi needs to work...
 				subzono.relu_prog_model = None
 				subzono.solve_relu_mip(torch.zeros_like(subzono.center), torch.zeros_like(subzono.center),
 									   apx_params=gurobi_params, box_bounds=box_bounds)
-				min_val, sub_argmin, _, _ = subzono.solve_relu_mip(c1[group], c2[group], apx_params=gurobi_params,
+				min_val, sub_argmin, _, _ = subzono.solve_relu_mip(c1, c2, apx_params=gurobi_params,
 					                                               start=start, box_bounds=box_bounds)
 			return min_val, sub_argmin, group
 
@@ -398,11 +401,18 @@ class PartitionGroup():
 		#####
 
 		# Resolve thread outs
-		obj_val = 0
+		obj_val = None
+		argmin = torch.zeros_like(c1)
 		for min_val, sub_argmin, group in thread_outs:
-			obj_val += min_val
-			sub_argmin = torch.tensor(sub_argmin).type(argmin.dtype).to(argmin.device).flatten()
-			argmin[group] = sub_argmin
+			if obj_val is None:
+				obj_val = min_val
+			else:
+				obj_val += min_val
+			sub_argmin = torch.tensor(sub_argmin).type(argmin.dtype).to(argmin.device)
+			if c1.dim() == 1:
+				argmin[group] = sub_argmin.flatten()
+			else:
+				argmin[:,:, group] = sub_argmin
 		return obj_val, argmin
 
 
@@ -429,7 +439,7 @@ class PartitionGroup():
 		assert sum([(partition_dim is None), (num_partitions is None)]) == 1
 
 		# Compute new groups
-		new_groups = {}
+		new_groups = copy.deepcopy(self.groups)
 		if self.style == 'fixed_dim':
 			assert partition_dim is not None
 			for idx, group in self.groups.items():

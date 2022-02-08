@@ -19,7 +19,7 @@ class DecompDual:
     def __init__(self, network, input_domain, preact_domain=Hyperbox,
                  choice='naive', partition=None, preact_bounds=None,
                  zero_dual=True, primal_mip_kwargs=None, mip_start=None,
-                 num_ub_iters=1): # TODO: implement KW initial dual bounds
+                 num_ub_iters=1, compute_all_bounds=False):
 
         self.network = network
         self.input_domain = input_domain
@@ -30,17 +30,28 @@ class DecompDual:
         self.choice = choice
         self.partition = partition
         self.primal_mip_kwargs = primal_mip_kwargs
+        self.compute_all_bounds = compute_all_bounds
 
         self.mip_start = mip_start
         self.num_ub_iters = num_ub_iters
         # Initialize duals
 
-        self.rhos = self.init_duals(zero_dual)
+        self.rhos = self.init_duals(zero_dual) # either (dim,) or (lb/ub, out_idx, dim)
 
 
     # ==============================================================================
     # =           Helper methods                                                   =
     # ==============================================================================
+    def _rho_shape_prefix(self, unsqueeze=True):
+        # Gets the prefix for the shape of rho
+        if self.compute_all_bounds:
+            return (2, self.network[-1].out_features)
+        else:
+            if unsqueeze:
+                return (1,)
+            return ()
+
+
     def init_duals(self, zero_dual):
         if zero_dual:
             return self._zero_duals()
@@ -48,13 +59,16 @@ class DecompDual:
             return self._kw_init_duals()
 
     def _zero_duals(self):
-
-
         rhos = OrderedDict()
         for idx, layer in enumerate(self.network):
             if isinstance(layer, nn.ReLU):
+                dual_shape = self.preact_bounds[idx].lbs.shape
+                dual_shape = self._rho_shape_prefix(unsqueeze=False) + dual_shape
+                dual_dtype = self.preact_bounds[idx].lbs.dtype
+                dual_device = self.preact_bounds[idx].lbs.device
 
-                rhos[idx] = nn.Parameter(torch.zeros_like(self.preact_bounds[idx].lbs))
+                rhos[idx] = nn.Parameter(torch.zeros(dual_shape, dtype=dual_dtype, device=dual_device))
+                #rhos[idx] = nn.Parameter(torch.zeros_like(self.preact_bounds[idx].lbs))
         return rhos
 
     def _kw_init_duals(self):
@@ -95,9 +109,11 @@ class DecompDual:
         if idx == 0:
             # Special case
             # Min -rho[1] * Aff(x_input)
-            lin_coeff = torch.zeros_like(self.preact_bounds[0].lbs)
+            lin_coeff = torch.zeros_like(rhos[1])
             if isinstance(self.network[0], nn.Linear):
-                out_coeff = (rhos[1] @ self.network[0].weight).squeeze()
+                out_coeff = F.linear(rhos[1], self.network[0].weight.T, None)
+                out_coeff_old = (rhos[1] @ self.network[0].weight)
+                assert torch.norm(out_coeff - out_coeff_old) < 1e-8
             elif isinstance(self.network[0], nn.Conv2d):
                 conv = self.network[0]
                 output_shape = utils.conv_output_shape(conv)
@@ -105,7 +121,9 @@ class DecompDual:
                 transpose_shape = utils.conv_transpose_shape(conv)
                 output_padding = (conv.input_shape[1] - transpose_shape[1],
                                   conv.input_shape[2] - transpose_shape[2])
-                out_coeff = F.conv_transpose2d(rhos[1].view((1,) + output_shape),
+
+                rho = rhos[1].view(self._rho_shape_prefix(unsqueeze=True) + output_shape)
+                out_coeff = F.conv_transpose2d(rho,
                                                conv.weight, None, conv.stride, conv.padding,
                                                output_padding, conv.groups, conv.dilation).flatten()
             else:
@@ -114,20 +132,35 @@ class DecompDual:
         elif idx < len(self.network) - 2:
             lin_coeff = -rhos[idx]
             if isinstance(self.network[idx + 1], nn.Linear):
-                out_coeff = (rhos[idx + 2] @ self.network[idx + 1].weight).squeeze()
+                out_coeff = F.linear(rhos[idx + 2], self.network[idx + 1].weight.T, None)
+
+                out_coeff_old = (rhos[idx + 2] @ self.network[idx + 1].weight)
+                try:
+                    assert torch.norm(out_coeff - out_coeff_old) < 1e-8
+                except Exception as err:
+                    print(out_coeff.shape, out_coeff_old.shape)
+                    raise err
             elif isinstance(self.network[idx + 1], nn.Conv2d):
                 conv = self.network[idx + 1]
                 output_shape = utils.conv_output_shape(conv)
                 transpose_shape = utils.conv_transpose_shape(conv)
                 output_padding = (conv.input_shape[1] - transpose_shape[1],
                                   conv.input_shape[2] - transpose_shape[2])
-                out_coeff = F.conv_transpose2d(rhos[idx + 2].view((1,) + output_shape),
+                rho = rhos[idx + 2].view(self._rho_shape_prefix(unsqueeze=True) + output_shape)
+                out_coeff = F.conv_transpose2d(rho,
                                                conv.weight, None, conv.stride, conv.padding,
                                                output_padding, conv.groups, conv.dilation).flatten()
 
         else:
             lin_coeff = -rhos[idx]
-            out_coeff = self.network[idx + 1].weight.squeeze()
+            if self.compute_all_bounds:
+                out_coeff = torch.stack([self.network[idx + 1].weight,
+                                         -self.network[idx + 1].weight], dim=0)
+                #out_coeff = out_coeff.view(2, 1, -1).expand_as(lin_coeff)
+                #out_coeff = out_coeff.expand(2, self.network[idx + 1].out_features, out_coeff.shape[-1])
+            else:
+                out_coeff = self.network[idx + 1].weight.squeeze()
+
         return lin_coeff, out_coeff
 
 
@@ -140,19 +173,23 @@ class DecompDual:
         total = {}
         rhos = self.rhos if (rhos is None) else rhos
         primals = primals if (primals is not None) else self.get_primals(rhos=rhos)[1]
-
+        shape = None
         for idx, layer in enumerate(self.network):
             if not isinstance(layer, nn.ReLU):
                 continue
             x_a = primals[(idx, 'A')]
             x_b = primals[(idx, 'B')]
-            total[idx] = rhos[idx] @ (x_a - x_b)
+            total[idx] = (rhos[idx] * (x_a - x_b)).sum(dim=-1)
+            shape = total[idx].shape
         # And final value is just the last variable
-        total[len(self.network)] = primals[(len(self.network), 'A')].item()
+        total[len(self.network)] = primals[(len(self.network), 'A')].view(shape)
 
         return sum(total.values())
 
-
+    def get_lbub_bounds(self, primals=None, rhos=None):
+        totals = self.lagrangian(primals=primals, rhos=rhos)
+        totals[1] *= -1
+        return totals.T
 
 
     def lagrangian_mip_bounds(self, rhos=None, time_limit=None):
@@ -299,7 +336,7 @@ class DecompDual:
                 v.data += stepsize * mhat[k] / (torch.sqrt(vhat[k])+ eps) # 'PLUS' here for dual ascent!
 
             if verbose and (step % verbose) == 0:
-                loss_val = self.lagrangian()
+                loss_val = self.lagrangian().sum()
                 print("Iter %02d | Certificate: %.02f  | Time: %.02f" % (step, loss_val, time.time() - last_time))
                 last_time = time.time()
 
@@ -315,7 +352,19 @@ class DecompDual:
 
     def _next_layer_relu_out(self, idx, x):
         layer = self.network[idx + 1]
-        return layer(x.relu().view(layer.input_shape).unsqueeze(0)).flatten()
+        input_shape = self._rho_shape_prefix(unsqueeze=True) + layer.input_shape
+        output_shape = self._rho_shape_prefix(unsqueeze=False) + (-1,)
+
+        if ((idx + 2) == len(self.network)) and self.compute_all_bounds:
+            weight_apply = lambda w, x_: (w * x_.relu()).sum(dim=1)
+            pos_out = weight_apply(layer.weight, x[0])
+            neg_out = weight_apply(-layer.weight, x[1])
+            if layer.bias is not None:
+                pos_out += layer.bias
+                neg_out -= layer.bias
+            return torch.stack([pos_out, neg_out], dim=0)
+        else:
+            return layer(x.relu().view(input_shape)).view(output_shape)
 
     def get_0th_primal(self, rhos):
         """ Solves min_x -rho[1] @ layers[0](x) over x in input
@@ -326,10 +375,13 @@ class DecompDual:
         _, out_coeff = self._get_coeffs(0, rhos=rhos)
         bound = self.preact_bounds[0]
         opt_val, x = bound.solve_lp(out_coeff, get_argmin=True)
-        return opt_val, x, self.network[0](x.view(self.network[0].input_shape).unsqueeze(0)).flatten()
+
+        rho_shape = x.shape[:-1]
+        x = x.view(rho_shape + self.network[0].input_shape)
+        return opt_val, x, self.network[0](x).view(rho_shape + (-1,))
 
 
-    def get_ith_primal_naive(self, idx, rhos):
+    def get_ith_primal_naive_old(self, idx, rhos):
         """ Solves min_z rho[idx]@z - rho[idx+2] @ Aff(relu(z))
             for z in bounds[z]
             RETURNS (z, layers[idx + 2](relu(z)))
@@ -340,6 +392,7 @@ class DecompDual:
             opt_val, x = bound.solve_relu_program(lin_coeff, relu_coeff, get_argmin=True)
         else:
             # Then partition into stable and unstable cases... and do zonotope
+            #TODO MAKE THIS HANDLE THE MULTI-CASE!
             stable_obj = torch.zeros_like(bound.lbs)
             on_coords = (bound.lbs >= 0)
             off_coords = (bound.ubs < 0)
@@ -361,6 +414,50 @@ class DecompDual:
 
         return opt_val, x, self._next_layer_relu_out(idx, x)
 
+
+    def get_ith_primal_naive(self, idx, rhos):
+        """ Solves min_z rho[idx]@z - rho[idx+2] @ Aff(relu(z))
+            for z in bounds[z]
+            RETURNS (z, layers[idx + 2](relu(z)))
+        """
+        lin_coeff, relu_coeff = self._get_coeffs(idx, rhos=rhos)
+        bound = self.preact_bounds[idx]
+        if isinstance(bound, Hyperbox):
+            opt_val, x = bound.solve_relu_program(lin_coeff, relu_coeff, get_argmin=True)
+        else:
+            # Identify stable neurons
+            stable_coords = (bound.lbs * bound.ubs) >= 0
+            stable_idxs = stable_coords.nonzero().long().squeeze()
+            lbs = bound.lbs.expand_as(lin_coeff)
+
+            stable_obj = (lin_coeff.index_select(-1, stable_idxs) +
+                          (relu_coeff * (lbs > 0)).index_select(-1, stable_idxs))
+
+            # Solve LP over zonotope spanning stable neurons
+            opt_val_0, argmin_0 = bound[stable_coords].solve_lp(stable_obj, get_argmin=True)
+
+
+            # Solve ReluProgram over BOX containing unstable neurons' idxs
+            ambig_box = bound[~stable_coords].as_hyperbox()
+            ambig_idxs = (~stable_coords).nonzero().long().squeeze()
+            ambig_lin = lin_coeff.index_select(-1, ambig_idxs)
+            ambig_relu = relu_coeff.index_select(-1, ambig_idxs)
+            opt_val_1, argmin_1 = ambig_box.solve_relu_program(ambig_lin, ambig_relu,
+                                                                   get_argmin=True)
+
+            # Combine answers
+            opt_val = opt_val_0 + opt_val_1
+            argmin = torch.zeros_like(lin_coeff)
+
+            # switch on the dim > 1 case
+            if lin_coeff.dim() > 1:
+                argmin[:,:, stable_coords] = argmin_0
+                argmin[:,:, ~stable_coords] = argmin_1
+            else:
+                argmin[stable_coords] = argmin_0
+                argmin[~stable_coords] = argmin_1
+
+            return opt_val, argmin, self._next_layer_relu_out(idx, argmin)
 
     #---------------------------------- PARTITION STUFF ----------------------------
 

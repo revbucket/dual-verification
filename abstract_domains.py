@@ -108,13 +108,54 @@ class Hyperbox(AbstractDomain):
         # Do this via centers and rads
         signs = torch.sign(obj)
         opt_point = F.relu(signs) * self.lbs + F.relu(-signs) * self.ubs
-        opt_val = obj @ opt_point + bias
+        opt_val = (obj * opt_point).sum(dim=-1) + bias
+        #opt_val = obj @ opt_point + bias
         if get_argmin:
             return opt_val, opt_point
         return opt_val
 
 
-    def solve_relu_program(self, lin_obj, relu_obj, get_argmin: bool= False):
+    def solve_relu_program_old(self, lin_obj, relu_obj, get_argmin: bool= False):
+        """ Solves ReLU program like min lin_obj @x + relu_obj @Relu(x) over hyperbox
+        ARGS:
+            lin_obj : objective vector for linear term
+            relu_obj : objective vector for relu term
+        RETURNS: either optimal_value or (optimal_value, optimal_point)
+        """
+        obj_shape = lin_obj.shape[:-1]
+
+        argmin = torch.clone(self.center.expand_as(lin_obj))
+        lbs, ubs = self.lbs.expand_as(argmin), self.ubs.expand_as(argmin)
+        #argmin = torch.clone(self.center)
+
+        # Handle lb >0 case
+        pos_idxs = (self.lbs > 0).expand_as(argmin)
+        sum_obj = lin_obj + relu_obj
+        argmin[pos_idxs] = torch.where(sum_obj[pos_idxs] >= 0, lbs[pos_idxs], ubs[pos_idxs])
+
+        # Handle ub < 0 case
+        neg_idxs = (self.ubs < 0).expand_as(argmin)
+        argmin[neg_idxs] = torch.where(lin_obj[neg_idxs] >= 0, lbs[neg_idxs], ubs[neg_idxs])
+
+        # Handle ambiguous case
+
+        ambig_mask = ~(pos_idxs + neg_idxs)
+        eval_at_l = (lin_obj * lbs)
+        eval_at_u = ((lin_obj + relu_obj) * ubs)
+        eval_at_0 = torch.zeros_like(eval_at_l)
+        min_idxs = torch.stack([eval_at_l, eval_at_u, eval_at_0], dim=-1).min(dim=-1)[1]
+        argmin[ambig_mask * (min_idxs == 0)] = lbs[ambig_mask * (min_idxs == 0)]
+        argmin[ambig_mask * (min_idxs == 1)] = ubs[ambig_mask * (min_idxs == 1)]
+        argmin[ambig_mask * (min_idxs == 2)] = 0.0
+
+        # Compute optimal value and return
+        opt_val = (lin_obj * argmin + relu_obj * torch.relu(argmin)).sum(dim=-1)
+        #opt_val = lin_obj @ argmin + relu_obj @ torch.relu(argmin)
+        if get_argmin:
+            return opt_val, argmin
+        return opt_val
+
+    def solve_relu_program(self, lin_obj, relu_obj, get_argmin: bool=False):
         """ Solves ReLU program like min lin_obj @x + relu_obj @Relu(x) over hyperbox
         ARGS:
             lin_obj : objective vector for linear term
@@ -122,36 +163,24 @@ class Hyperbox(AbstractDomain):
         RETURNS: either optimal_value or (optimal_value, optimal_point)
         """
 
-        argmin = torch.clone(self.center)
-
-        # Handle lb >0 case
-        pos_idxs = self.lbs > 0
-        sum_obj = lin_obj + relu_obj
-        argmin[pos_idxs] = torch.where(sum_obj[pos_idxs] >= 0, self.lbs[pos_idxs], self.ubs[pos_idxs])
-
-        # Handle ub < 0 case
-        neg_idxs = self.ubs < 0
-        argmin[neg_idxs] = torch.where(lin_obj[neg_idxs] >= 0, self.lbs[neg_idxs], self.ubs[neg_idxs])
-
-        # Handle ambiguous case
-        ambig_idxs = (~(pos_idxs + neg_idxs)).nonzero()
-
-        argmin_ambig = argmin[ambig_idxs]
-        lbs_ambig = self.lbs[ambig_idxs]
-        ubs_ambig = self.ubs[ambig_idxs]
-        lin_ambig = lin_obj[ambig_idxs]
-        relu_ambig = relu_obj[ambig_idxs]
-
-        eval_at_l = lin_ambig * lbs_ambig
-        eval_at_u = (lin_ambig + relu_ambig) * ubs_ambig
+        obj_shape = lin_obj.shape[:-1]
+        argmin = torch.clone(self.center.expand_as(lin_obj))
+        lbs, ubs = self.lbs.expand_as(argmin), self.ubs.expand_as(argmin)
+        # Eval at lb, ub, 0, and mask for where not applicable
+        eval_at_l = ((lin_obj + relu_obj * (lbs > 0)) * lbs)
+        eval_at_u = ((lin_obj + relu_obj * (ubs > 0)) * ubs)
         eval_at_0 = torch.zeros_like(eval_at_l)
-        min_idxs = torch.stack([eval_at_l, eval_at_u, eval_at_0]).min(dim=0)[1]
-        argmin[ambig_idxs[min_idxs == 0]] = lbs_ambig[min_idxs == 0]
-        argmin[ambig_idxs[min_idxs == 1]] = ubs_ambig[min_idxs == 1]
-        argmin[ambig_idxs[min_idxs == 2]] = 0.0
+        eval_at_0[(lbs * ubs) > 0] = float('inf')
+
+        min_idxs = torch.stack([eval_at_l, eval_at_u, eval_at_0], dim=-1).min(dim=-1)[1]
+        argmin[min_idxs == 0] = lbs[min_idxs == 0]
+        argmin[min_idxs == 1] = ubs[min_idxs == 1]
+        argmin[min_idxs == 2] = 0.0
 
         # Compute optimal value and return
-        opt_val = lin_obj @ argmin + relu_obj @ torch.relu(argmin)
+        opt_val = (lin_obj * argmin + relu_obj * torch.relu(argmin)).sum(dim=-1)
+
+
         if get_argmin:
             return opt_val, argmin
         return opt_val
@@ -297,10 +326,15 @@ class Zonotope(AbstractDomain):
 
     def solve_lp(self, obj: torch.Tensor, get_argmin: bool = False, bias=0.0):
         # RETURNS: either optimal_value or (optimal_value, optimal point)
-        center_val = self.center @ obj
-        opt_signs = -torch.sign(self.generator.T @ obj)
-        opt_point = self.center + self.generator @ opt_signs
-        opt_val = opt_point @ obj + bias
+        center_val = (self.center.expand_as(obj) * obj).sum(dim=-1)
+        #center_val = self.center @ obj
+        opt_signs = -torch.sign(obj @ self.generator)
+        #opt_signs = -torch.sign(self.generator.T @ obj)
+        opt_point = self.center.expand_as(obj) + (opt_signs @ self.generator.T)
+        #opt_point = self.center + self.generator @ opt_signs
+
+        opt_val = (opt_point * obj).sum(dim=-1)
+        #opt_val = opt_point @ obj + bias
         if get_argmin:
             return (opt_val, opt_point)
         return opt_val
@@ -869,40 +903,41 @@ class Zonotope(AbstractDomain):
 
         # Set the objective and optimize
 
-        lin_obj = torch.clone(c1).squeeze().detach().cpu().numpy()
-        lin_obj[on_idxs] += c2[on_idxs].detach().cpu().numpy()
-        relu_obj = c2[unc_idxs].squeeze().detach().cpu().numpy()
+        def model_opt(c1, c2, xs=xs):
+            lin_obj = torch.clone(c1).squeeze().detach().cpu().numpy()
+            lin_obj[on_idxs] += c2[on_idxs].detach().cpu().numpy()
+            relu_obj = c2[unc_idxs].squeeze().detach().cpu().numpy()
+            try:
+                model.setObjective(lin_obj @ xs + relu_obj @ relu_vars, gb.GRB.MINIMIZE)
+            except Exception as err:
+                # In the case that |unc_idxs| == 1
+                print('ERR', lin_obj.__class__, xs.__class__, type(relu_obj))
+                print('ERR2', lin_obj.shape, xs.shape)
+                xs = xs.detach().cpu().numpy()
+                model.setObjective(lin_obj @ xs + relu_obj * relu_vars, gb.GRB.MINIMIZE)
 
-        try:
-            model.setObjective(lin_obj @ xs + relu_obj @ relu_vars, gb.GRB.MINIMIZE)
-        except Exception as err:
-            # In the case that |unc_idxs| == 1
-            model.setObjective(lin_obj @ xs + relu_obj * relu_vars, gb.GRB.MINIMIZE)
-
-        if False: #start == 'prev' and self.past_rp_solution is not None:
-            for var, past_val in zip(model.getVars(), self.past_rp_solution):
-                var.Start = past_val
-
-        model.update()
-        model.optimize()
-
-        try:
-            self.past_rp_solution = [_.X for _ in model.getVars()]
-        except Exception as err:
-            print("WEIRD GUROBI BUG: MODEL STATUS ", model.Status)
-            raise err
-
-        # Debug block!
-        if model.Status == 2 and abs(model.ObjBound - model.objVal) > 1e-4:
-            print("WEIRD ISSUE HERE", model.Status, model.ObjBound - model.objVal)
-
-        #/debug block
+            model.update()
+            model.optimize()
+            xvals = torch.tensor([_.x for _ in xs], device=self.center.device)
+            yvals = torch.tensor([_.x for _ in ys], device=self.center.device)
+            return model.ObjBound, xvals, yvals, model
 
 
-        xvals = torch.tensor([_.x for _ in xs], device=self.center.device)
-        yvals = torch.tensor([_.x for _ in ys], device=self.center.device)
 
-        return model.ObjBound, xvals, yvals, model
+        if c1.dim() == 1:
+            return model_opt(c1, c2)
+        else:
+            objBounds = torch.zeros(c1.shape[:2], device=self.center.device)
+            xvals = [] # stack later
+            for i in range(c1.shape[0]):
+                x_rows = []
+                for j in range(c2.shape[1]):
+                    obj, xs, _, _ = model_opt(c1[i][j], c2[i][j])
+                    objBounds[i][j] = obj
+                    x_rows.append(xs)
+                xvals.append(torch.stack(x_rows, dim=0))
+            xvals = torch.stack(xvals, dim=0)
+            return objBounds, xvals, None, model
 
 
 
@@ -1250,7 +1285,7 @@ class Zonotope(AbstractDomain):
         """ Solves relu program by partition into groups of 2d
             e.g. min c1*z + c2*relu(z)
         ARGS:
-            c1,c2: tensor for objective vector
+            c1,c2: tensor for objective vector : POSSIBLY BATCHED!
             groups: groups arg to be fed into batch_2d_partition
             group_vs: if not None is like the output of batch_2d_partition (num_groups, 2, #vertices + 1)
             group_crossings: if not None, is like the output of batch_2d_crossings (num_groups, 2, #vertices + 1)
@@ -1280,40 +1315,53 @@ class Zonotope(AbstractDomain):
             box_zono_crossings, box_zono_masks = self.batch_zono_box_crossings(groups, group_vs, box_bounds)
         #--------------
 
+        # Setup tools
+        true_argmin = torch.zeros_like(c1)
+        if c1.dim() == 1:
+            c1 = c1[groups].unsqueeze(-1)
+            c2 = c2[groups].unsqueeze(-1)
+        else:
+            c1 = c1[:,:,groups].unsqueeze(-1)
+            c2 = c2[:,:,groups].unsqueeze(-1)
+        eval_fxn = lambda vs: (c1 * vs + c2 * vs.relu()).sum(dim=-2)
+
+        def mask_op(vals, mask):
+            if vals.dim() <= 2:
+                vals[~mask] = float('inf')
+            else:
+                vals[:,:,~mask] = float('inf')
+
+
+
+
         # Now this gets tricky.
         # Step one is to consider the values produced by vertices...
-        vertex_vals = (c1[groups].unsqueeze(-1) * group_vs +
-                       c2[groups].unsqueeze(-1) * torch.relu(group_vs)).sum(dim=1)
+        vertex_vals = eval_fxn(group_vs)
 
         if group_vertex_masks != None and group_vertex_masks != {}:
-            vertex_vals[~group_vertex_masks] = float('inf')
-        vertex_mins, vertex_min_idxs = vertex_vals.min(dim=1)
+            mask_op(vertex_vals, group_vertex_masks)
+
+        vertex_mins, vertex_min_idxs = vertex_vals.min(dim=-1)
 
         # Now consider the crossings
-        crossing_vals = (c1[groups].unsqueeze(-1) * group_crossings +
-                         c2[groups].unsqueeze(-1) * torch.relu(group_crossings)).sum(dim=1)
-
-        crossing_vals[~group_crossing_masks] = float('inf')
-        crossing_mins, crossing_min_idxs = crossing_vals.min(dim=1)
+        crossing_vals = eval_fxn(group_crossings)
+        mask_op(crossing_vals, group_crossing_masks)
+        crossing_mins, crossing_min_idxs = crossing_vals.min(dim=-1)
 
 
         # if box bounds are specified, consider these, too
         all_vs = [group_vs, group_crossings]
         all_min_vals = [(vertex_mins, vertex_min_idxs), (crossing_mins, crossing_min_idxs)]
         if group_vertex_masks != None and group_vertex_masks != {}:
-            box_vertex_vals = (c1[groups].unsqueeze(-1) * group_box_vertices +
-                               c2[groups].unsqueeze(-1) * torch.relu(group_box_vertices)).sum(dim=1)
-
-            box_vertex_vals[~group_box_masks] = float('inf')
-            box_vertex_mins, box_vertex_min_idxs = box_vertex_vals.min(dim=1)
+            box_vertex_vals = eval_fxn(group_box_vertices)
+            mask_op(box_vertex_vals, group_box_masks)
+            box_vertex_mins, box_vertex_min_idxs = box_vertex_vals.min(dim=-1)
 
 
             # compute box<->zono mins and indices
-            box_zono_vals = (c1[groups].unsqueeze(-1) * box_zono_crossings +
-                             c2[groups].unsqueeze(-1) * torch.relu(box_zono_crossings)).sum(dim=1)
-
-            box_zono_vals[~box_zono_masks] = float('inf')
-            box_zono_mins, box_zono_min_idxs = box_zono_vals.min(dim=1)
+            box_zono_vals = eval_fxn(box_zono_crossings)
+            mask_op(box_zono_vals, box_zono_masks)
+            box_zono_mins, box_zono_min_idxs = box_zono_vals.min(dim=-1)
 
             all_vs.extend([group_box_vertices, box_zono_crossings])
             all_min_vals.extend([(box_vertex_mins, box_vertex_min_idxs),
@@ -1321,17 +1369,31 @@ class Zonotope(AbstractDomain):
 
 
         # And then take mins over candidates and combine the answers
-        all_vals = torch.stack([_[0] for _ in all_min_vals], dim=0)
+        all_vals = torch.stack([_[0] for _ in all_min_vals], dim=-1)
+        all_mins, min_loc_idxs = all_vals.min(dim=-1)
 
-        all_mins, min_loc_idxs = all_vals.min(dim=0)
+        # And now branch over what form we're in
+        if c1.dim() <= 3:
+            argmin = torch.zeros_like(groups).float()
+            for i, ((mins, min_idxs), vs) in enumerate(zip(all_min_vals, all_vs)):
+                #print(argmin.shape, vs.shape, min_loc_idxs.shape, min_idxs.shape)
 
-        argmin = torch.zeros_like(groups).float()
-        for i, ((mins, min_idxs), vs) in enumerate(zip(all_min_vals, all_vs)):
-            argmin[min_loc_idxs == i] = vs[min_loc_idxs == i, :, min_idxs[min_loc_idxs == i]]
+                argmin[min_loc_idxs == i] = vs[min_loc_idxs == i, :, min_idxs[min_loc_idxs == i]]
 
-        true_argmin = torch.zeros_like(self.center)
-        true_argmin[groups] = argmin
-        return all_mins.sum(), true_argmin
+            true_argmin[groups] = argmin
+
+        else:
+            argmin = torch.zeros_like(c1).squeeze(-1)
+            for i, ((mins, min_idxs), vs) in enumerate(zip(all_min_vals, all_vs)):
+
+                v_exp = vs.expand(argmin.shape[:2] + vs.shape)
+                argmin[min_loc_idxs == i,:] = v_exp[min_loc_idxs == i, :, min_idxs[min_loc_idxs == i]]
+
+            true_argmin[:,:, groups] = argmin
+
+
+        return all_mins.sum(dim=-1), true_argmin
+
 
 
     """ Box bounds for 2d additions:
