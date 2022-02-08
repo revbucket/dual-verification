@@ -144,6 +144,9 @@ class FFNet(nn.Module):
         new_net = nn.Sequential(*list(self.net[:-1]) + [new_linear_layer])
         return FFNet(new_net, self.dtype)
 
+    def prefix(self, idx):
+        return FFNet(self.net[:idx], self.dtype)
+
     # ====================================================================
     # =           Evaluation/Forward pass stuff                          =
     # ====================================================================

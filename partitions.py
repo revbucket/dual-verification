@@ -443,6 +443,8 @@ class PartitionGroup():
 		if self.style == 'fixed_dim':
 			assert partition_dim is not None
 			for idx, group in self.groups.items():
+				if idx not in partition_dim:
+					continue
 				current_groupsize = max(len(_) for _ in group)
 				new_groupsize = self._access_intdict(idx, partition_dim)
 

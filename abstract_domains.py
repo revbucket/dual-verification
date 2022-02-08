@@ -913,7 +913,8 @@ class Zonotope(AbstractDomain):
                 # In the case that |unc_idxs| == 1
                 print('ERR', lin_obj.__class__, xs.__class__, type(relu_obj))
                 print('ERR2', lin_obj.shape, xs.shape)
-                xs = xs.detach().cpu().numpy()
+                if isinstance(xs, torch.Tensor):
+                    xs = xs.detach().cpu().numpy()
                 model.setObjective(lin_obj @ xs + relu_obj * relu_vars, gb.GRB.MINIMIZE)
 
             model.update()
