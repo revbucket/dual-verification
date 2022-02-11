@@ -340,6 +340,215 @@ class DecompDual:
                 print("Iter %02d | Certificate: %.02f  | Time: %.02f" % (step, loss_val, time.time() - last_time))
                 last_time = time.time()
 
+    @utils.no_grad
+    def simple_prox(self, num_iters, verbose=True):
+        params = {'num_inner_iter': 10,
+                  'eta': 50,
+                  'acceleration_dict': {'momentum': 0}}
+        eta = params['eta']
+
+        def as_dual_subg(primal):
+            dual_subg = OrderedDict()
+            for k in self.rhos.keys():
+                dual_subg[k] = primal[(k, 'A')] - primal[(k, 'B')]
+            return dual_subg
+
+        def get_all_prox_rhos(primal, rhos=None, eta=eta):
+            dual_subg = as_dual_subg(primal)
+            if rhos is None:
+                rhos = self.rhos
+            return {k: self.rhos[k] + dual_subg[k] / eta for k in rhos.keys()}
+
+        def get_opt_stepsize(prox_rhos, cond_grad, last_primal, eta=eta):
+            max_key = max(cond_grad.keys(), key=lambda p: p[0])
+            numer = 0.0
+            for k in prox_rhos:
+                numer += prox_rhos[k] @ (cond_grad[(k, 'B')] - last_primal[(k, 'B')] -
+                                         cond_grad[(k, 'A')] + last_primal[(k, 'A')])
+
+
+            numer += (cond_grad[max_key] - last_primal[max_key]).item()
+
+            denom = sum((cond_grad[(k, 'B')] - last_primal[(k, 'B')] -
+                         cond_grad[(k, 'A')] + last_primal[(k, 'A')]).norm().pow(2)
+                        for k in prox_rhos) / eta
+
+            #print(numer / denom)
+            return torch.clamp(numer/denom, 0.0, 1.0)
+
+
+        primals = self.get_primals(self.rhos)[1]
+        prox_rhos = self.rhos
+        last_time = time.time()
+        for outer_iter in range(num_iters):
+            prox_rhos = get_all_prox_rhos(primals, rhos=prox_rhos)
+            for inner_iter in range(params['num_inner_iter']):
+                cond_grad = self.get_primals(prox_rhos)[1]
+                opt_stepsize = get_opt_stepsize(prox_rhos, cond_grad, primals)
+                #print("Stepsize: %.02f" % opt_stepsize)
+                primals = {k: primals[k] + opt_stepsize * (cond_grad[k] - primals[k])
+                           for k in primals}
+                prox_rhos = get_all_prox_rhos(primals, rhos=prox_rhos)
+
+            if verbose and (outer_iter % verbose) == 0:
+                loss_val = self.lagrangian(rhos=prox_rhos).sum()
+                print("Iter %02d | Certificate: %.02f  | Time: %.02f" % (outer_iter, loss_val, time.time() - last_time))
+        return prox_rhos
+
+
+
+
+    @utils.no_grad
+    def prox_method(self, num_iters, verbose=True, iter_start=0,
+                    optim_params=None, use_prox=False):
+        """ Runs the proximal method
+
+        General scheme:
+        - Collect original set of primals
+        - Loop for number of outer iterations:
+            -Loop for number of inner iterations
+                - Loop over layers:
+                    1. Compute coefficients to feed to RP solver
+                    2. Compute conditional gradients
+                    3. Compute optimal step size
+                    4. Update primals
+                    5. Update duals
+        Finally:
+            Return lagrangian
+        """
+        params = {'num_inner_iter': 2,
+                  'eta': 1,
+                  'initial_eta': 1.0,
+                  'final_eta': 50,
+                  'acceleration_dict': {'momentum': 0.3}}
+
+        if optim_params is not None:
+            params.update(optim_params)
+
+        def update_duals(dual_subgrad, params=params):
+            accel_dict = params['acceleration_dict']
+            if accel_dict['momentum'] == 0:
+                update_dict = dual_subgrad
+            else:
+                if accel_dict.get('momentum_state') is None:
+                    accel_dict['momentum_state'] = dual_subgrad
+                else:
+                    for k, v in accel_dict['momentum_state'].items():
+                        v.data = v.data * accel_dict['momentum'] + dual_subgrad[k]
+                update_dict = accel_dict['momentum_state']
+
+            for k, v in self.rhos.items():
+                v.data += update_dict[k]
+
+
+
+        primals = self.get_primals(self.rhos)[1]
+        layers = [0] + sorted(self.rhos.keys())
+        last_time = time.time()
+
+        for outer_iter in range(num_iters):
+            # Do inner loop (also over layers)
+            if (params.get('initial_eta') is not None) and (params.get('final_eta') is not None):
+                eta = params['initial_eta'] + (outer_iter / num_iters) * (params['final_eta'] - params['initial_eta'])
+            else:
+                eta = params['eta']
+
+            for inner_iter in range(params['num_inner_iter']):
+                for layer_num in layers:
+                    prox_rhos = self._get_prox_rhos(layer_num, primals, eta=eta)
+
+                    if layer_num == 0:
+                        opt_val, x_b, x_a = self.get_0th_primal(rhos=prox_rhos)
+                        cond_grad = {(1, 'A'): x_a}
+                    else:
+                        opt_val, x_b, x_a = self.get_ith_primal(layer_num, rhos=prox_rhos)
+                        cond_grad = {(layer_num, 'B'): x_b,
+                                     (layer_num + 2, 'A'): x_a}
+
+                    stepsize = self._get_prox_stepsize(layer_num, prox_rhos, cond_grad, primals,
+                                                       eta=eta)
+
+                    for k in cond_grad:
+                        primals[k] = primals[k] + stepsize * (cond_grad[k] - primals[k])
+            # End inner loop
+
+            # Update dual variables
+            dual_subg = OrderedDict()
+            for k in self.rhos:
+                dual_subg[k] = (primals[(k, 'A')] - primals[(k, 'B')]) / eta
+            update_duals(dual_subg)
+
+
+
+            if verbose and (outer_iter % verbose) == 0:
+
+                if use_prox:
+                    prox_rhos = {k: self.rhos[k] + dual_subg[k] / eta for k in self.rhos.keys()}
+                    loss_val = self.lagrangian(rhos=prox_rhos).sum()
+                else:
+                    loss_val = self.lagrangian().sum()
+                print("Outer Iter %02d | Certificate: %.02f  | Time: %.02f" % (outer_iter, loss_val, time.time() - last_time))
+                last_time = time.time()
+
+
+    def _get_prox_rhos(self, idx, primals, eta=1e-3):
+        """ Gets the rhos used for computing the directions used to compute
+            the conditional gradients
+        ARGS:
+            idx: which layer idx to the primals we ask for
+            primals: last primals (used for computing the directions)
+            eta: parameter used for strong convexity of the dual inner min
+        RETURNS:
+            dict emulating self.rhos (but only has keys idx, idx+2)
+        """
+
+        # Just create a custom 'rhos' object here
+        new_rhos = OrderedDict()
+        if idx == 0:
+            new_rhos[1] = self.rhos[1] + (primals[(1, 'A')] - primals[(1, 'B')]) / eta
+        elif idx < len(self.network) - 2:
+            new_rhos[idx] = self.rhos[idx] +\
+                            (primals[(idx, 'A')] - primals[(idx, 'B')]) / eta
+            new_rhos[idx + 2] = self.rhos[idx + 2] + \
+                                (primals[(idx + 2, 'A')] - primals[(idx + 2, 'B')]) / eta
+
+        else:
+            new_rhos[idx] = self.rhos[idx] +\
+                            (primals[(idx, 'A')] - primals[(idx, 'B')]) / eta
+
+        return new_rhos
+
+
+    def _get_prox_stepsize(self, idx, prox_rhos, cond_grad, primals, eta=1e-3):
+        """ TODO : COMPUTE THIS HERE... slighly complicated math """
+
+        if idx == 0:
+            """ rho[1] @ (x_0^A - z_0^A) + 1/eta* (z_0^A-z_0^B) @ (x_0^A-z_0^A)
+                ---------------------------------------------------------------
+                         -1/eta ||x_0^A-z_0^A||^2
+            """
+            residual = (cond_grad[(1, 'A')] - primals[(1, 'A')])
+            numer = (prox_rhos[1] * residual).sum(dim=-1)
+            denom = -1/eta * residual.pow(2).sum(-1)
+
+        elif idx < len(self.network) - 2:
+            residual_kp1 = cond_grad[(idx + 2, 'A')] - primals[(idx + 2, 'A')]
+            residual_k = cond_grad[(idx, 'B')] - primals[(idx, 'B')]
+            numer = (prox_rhos[idx +2] * residual_kp1).sum(dim=-1) -\
+                    (prox_rhos[idx] * residual_k).sum(dim=-1)
+            denom = -1 * (residual_k.pow(2).sum(-1) + residual_kp1.pow(2).sum(-1)) / eta
+
+        else:
+            residual_kp1 = cond_grad[(idx + 2, 'A')] - primals[(idx + 2, 'A')]
+            residual_k = cond_grad[(idx, 'B')] - primals[(idx, 'B')]
+            numer = residual_kp1 - (prox_rhos[idx] * residual_k).sum(dim=-1)
+            denom = -(residual_k.pow(2).sum(-1))/ eta
+
+        gamma = numer / denom
+        return torch.clamp(gamma, 0.0, 1.0)
+
+
+
 
 
 

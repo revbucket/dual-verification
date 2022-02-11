@@ -412,7 +412,7 @@ class PartitionGroup():
 			if c1.dim() == 1:
 				argmin[group] = sub_argmin.flatten()
 			else:
-				argmin[:,:, group] = sub_argmin
+				argmin[:,:, group] = sub_argmin.squeeze(-1)
 		return obj_val, argmin
 
 

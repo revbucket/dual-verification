@@ -77,10 +77,13 @@ class MultiStageDual:
         prefix_net = self.network.prefix(idx)
         decomp = DecompDual(prefix_net, self.input_domain,
                             preact_domain=self.preact_domain,
-                            choice=self.choice,
+                            choice='naive',
                             preact_bounds=preact_bounds,
                             compute_all_bounds=True)
         decomp.manual_dual_ascent(num_iters, verbose=verbose,
+                                  optim_params=self.adam_params)
+        decomp.choice = 'partition'
+        decomp.manual_dual_ascent(200, verbose=verbose,
                                   optim_params=self.adam_params)
         if self.final_dims is not None:
             # Maybe a key here?
