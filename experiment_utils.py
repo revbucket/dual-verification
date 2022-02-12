@@ -135,8 +135,8 @@ def run_optprox(bin_net, test_input, use_intermed=True, return_model=False):
 
     optprox_time = time.time() - optprox_start
     if return_model:
-        return optprox_net, lb.cpu().item(), optprox_time
-    return lb.cpu().item(), optprox_time
+        return optprox_net, lb.cpu(), optprox_time
+    return lb.cpu(), optprox_time
 
 
 def run_explp(bin_net, test_input, use_intermed=True, return_model=False, num_iters=1000):
@@ -248,7 +248,7 @@ def run_lp(bin_net, test_input, use_intermed=True):
 # =           MNIST EXPERIMENT HELPERS                                         =
 # ==============================================================================
 
-def setup_mnist_example(network, ex_id, eps, show=False):
+def setup_mnist_example(network, ex_id, eps, show=False, elide=False):
     # Sets up an example on the mnist dataset. Returns None if net is wrong on this example
     # Otherwise, returns (bin_net, Hyperbox) that we evaluate
     # By default clips into range [0,1]
@@ -266,7 +266,10 @@ def setup_mnist_example(network, ex_id, eps, show=False):
 
     if y != pred_label.item():
         return None, None
-    bin_net = network.binarize(y, (y+1) % 10).to(device)
+    if elide:
+        bin_net = network.elide(y).to_device
+    else:
+        bin_net = network.binarize(y, (y+1) % 10).to(device)
 
     test_input = Hyperbox.linf_box(x.flatten(), eps).clamp(0.0, 1.0)
     bin_net(x[None])
@@ -361,7 +364,7 @@ def decomp_2d_MNIST_PARAMS(bin_net, test_input, return_obj=False, preact_bounds=
 # ===============================================================================
 
 
-def setup_cifar_example(network, ex_id, eps):
+def setup_cifar_example(network, ex_id, eps, elide=False):
     # Sets up an example on the cifar dataset. Returns None if net is wrong on this example
     # Otherwise, returns (bin_net, Hyperbox) that we evaluate
     # By default clips into range [0,1]
@@ -380,7 +383,11 @@ def setup_cifar_example(network, ex_id, eps):
 
     if y != pred_label.item():
         return None, None
-    bin_net = network.binarize(y, (y+1) % 10).to(device)
+
+    if elide:
+        bin_net = network.elide(y).to_device()
+    else:
+        bin_net = network.binarize(y, (y+1) % 10).to(device)
 
     test_input = Hyperbox.linf_box(x.flatten(), eps)
     bin_net(x[None])

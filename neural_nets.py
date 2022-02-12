@@ -358,9 +358,9 @@ class BoxInformedZonos(PreactBounds):
         return all_boxes
 
     def get_lbub(self, idx):
-        box_idx = (idx + 1) / 2
+        box_idx = (idx + 1)
         assert box_idx % 2 == 0
-
+        box_idx = round(box_idx / 2)
         box = self.box_range[round(box_idx)]
         bound = self.bounds[idx]
 
