@@ -267,7 +267,7 @@ def setup_mnist_example(network, ex_id, eps, show=False, elide=False):
     if y != pred_label.item():
         return None, None
     if elide:
-        bin_net = network.elide(y).to_device
+        bin_net = network.elide(y).to(device)
     else:
         bin_net = network.binarize(y, (y+1) % 10).to(device)
 
@@ -385,7 +385,7 @@ def setup_cifar_example(network, ex_id, eps, elide=False):
         return None, None
 
     if elide:
-        bin_net = network.elide(y).to_device()
+        bin_net = network.elide(y).to(device)
     else:
         bin_net = network.binarize(y, (y+1) % 10).to(device)
 
