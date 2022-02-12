@@ -46,7 +46,11 @@ class DecompDual:
     def _rho_shape_prefix(self, unsqueeze=True):
         # Gets the prefix for the shape of rho
         if self.compute_all_bounds:
-            return (2, self.network[-1].out_features)
+            if isinstance(self.network[-1], nn.Conv2d):
+                out_features = np.prod(utils.conv_output_shape(self.network[-1]))
+            else:
+                out_features = self.network[-1].out_features
+            return (2, out_features)
         else:
             if unsqueeze:
                 return (1,)
@@ -67,34 +71,36 @@ class DecompDual:
                 dual_shape = self._rho_shape_prefix(unsqueeze=False) + dual_shape
                 dual_dtype = self.preact_bounds[idx].lbs.dtype
                 dual_device = self.preact_bounds[idx].lbs.device
-
                 rhos[idx] = nn.Parameter(torch.zeros(dual_shape, dtype=dual_dtype, device=dual_device))
-                #rhos[idx] = nn.Parameter(torch.zeros_like(self.preact_bounds[idx].lbs))
         return rhos
+
 
     def _kw_init_duals(self):
-        # Stealing this code because I'm lazy
-        rhos = OrderedDict()
-        domain = torch.stack([self.input_domain.lbs.view(self.network[0].input_shape),
-                              self.input_domain.ubs.view(self.network[0].input_shape)], dim=-1)
-        coeffs_idx = len([_ for _ in self.network if isinstance(_, nn.ReLU)]) + 1
-        coeffs = {coeffs_idx: torch.Tensor([[-1.0]]).to(self.network[0].weight.device)}
-        intermed_net = SaddleLP([lay for lay in utils.add_flattens(self.network)])
-        intermed_net.set_solution_optimizer('init', None)
-        intermed_net.define_linear_approximation(domain, force_optim=True, no_conv=False,
-                                                         override_numerical_errors=True)
+        stem_rhos = OrderedDict()
+        final_layer = self.network[-1]
+        # And now go backwards:
+        relu_idxs = set(i for i, el in enumerate(self.network)
+                        if isinstance(el, nn.ReLU))
 
-        intermed_net.set_initialisation('KW')
-        kw_rhos = intermed_net.decomposition.initial_dual_solution(intermed_net.weights, coeffs,
-                                            intermed_net.lower_bounds, intermed_net.upper_bounds).rhos
+        if self.compute_all_bounds:
+            running_rho = utils.get_weight(self.network[-1], stack=True)
+        else:
+            running_rho = torch.clone(self.network[-1].weight[0])
+        with torch.no_grad():
+            for idx in range(len(self.network) - 2, 0, -1):
+                layer = self.network[idx]
+                if isinstance(layer, nn.ReLU):
+                    running_rho *= self.preact_bounds.get_scale(idx)
+                    stem_rhos[idx] = torch.clone(running_rho)
+                elif isinstance(layer, (nn.Linear, nn.Conv2d)):
+                    running_rho = self._layer_transpose(running_rho, layer)
+                else:
+                    raise NotImplementedError()
 
+            rhos = OrderedDict((k, nn.Parameter(v.data)) for k, v in
+                               reversed(stem_rhos.items()))
+            return rhos
 
-        running_idx = 0
-        for idx, layer in enumerate(self.network):
-            if isinstance(layer, nn.ReLU):
-                rhos[idx] = nn.Parameter(kw_rhos[running_idx].flatten().data)
-                running_idx += 1
-        return rhos
 
 
     def parameters(self):
@@ -111,58 +117,43 @@ class DecompDual:
             # Special case
             # Min -rho[1] * Aff(x_input)
             lin_coeff = torch.zeros_like(rhos[1])
-            if isinstance(self.network[0], nn.Linear):
-                out_coeff = F.linear(rhos[1], self.network[0].weight.T, None)
-                out_coeff_old = (rhos[1] @ self.network[0].weight)
-                assert torch.norm(out_coeff - out_coeff_old) < 1e-8
-            elif isinstance(self.network[0], nn.Conv2d):
-                conv = self.network[0]
-                output_shape = utils.conv_output_shape(conv)
-                # Need to compute output padding here
-                transpose_shape = utils.conv_transpose_shape(conv)
-                output_padding = (conv.input_shape[1] - transpose_shape[1],
-                                  conv.input_shape[2] - transpose_shape[2])
-
-                rho = rhos[1].view(self._rho_shape_prefix(unsqueeze=True) + output_shape)
-                out_coeff = F.conv_transpose2d(rho,
-                                               conv.weight, None, conv.stride, conv.padding,
-                                               output_padding, conv.groups, conv.dilation).flatten()
-            else:
-                raise NotImplementedError()
+            out_coeff = self._layer_transpose(rhos[1], self.network[0])
 
         elif idx < len(self.network) - 2:
             lin_coeff = -rhos[idx]
-            if isinstance(self.network[idx + 1], nn.Linear):
-                out_coeff = F.linear(rhos[idx + 2], self.network[idx + 1].weight.T, None)
-
-                out_coeff_old = (rhos[idx + 2] @ self.network[idx + 1].weight)
-                try:
-                    assert torch.norm(out_coeff - out_coeff_old) < 1e-8
-                except Exception as err:
-                    print(out_coeff.shape, out_coeff_old.shape)
-                    raise err
-            elif isinstance(self.network[idx + 1], nn.Conv2d):
-                conv = self.network[idx + 1]
-                output_shape = utils.conv_output_shape(conv)
-                transpose_shape = utils.conv_transpose_shape(conv)
-                output_padding = (conv.input_shape[1] - transpose_shape[1],
-                                  conv.input_shape[2] - transpose_shape[2])
-                rho = rhos[idx + 2].view(self._rho_shape_prefix(unsqueeze=True) + output_shape)
-                out_coeff = F.conv_transpose2d(rho,
-                                               conv.weight, None, conv.stride, conv.padding,
-                                               output_padding, conv.groups, conv.dilation).flatten()
-
+            out_coeff = self._layer_transpose(rhos[idx + 2], self.network[idx + 1])
         else:
             lin_coeff = -rhos[idx]
             if self.compute_all_bounds:
-                out_coeff = torch.stack([self.network[idx + 1].weight,
-                                         -self.network[idx + 1].weight], dim=0)
-                #out_coeff = out_coeff.view(2, 1, -1).expand_as(lin_coeff)
-                #out_coeff = out_coeff.expand(2, self.network[idx + 1].out_features, out_coeff.shape[-1])
+                out_coeff = utils.get_weight(self.network[idx + 1], stack=True)
             else:
-                out_coeff = self.network[idx + 1].weight.squeeze()
+                out_coeff = out_coeff_old = self.network[idx + 1].weight.squeeze()
 
         return lin_coeff, out_coeff
+
+
+    def _layer_transpose(self, x, layer):
+        if isinstance(layer, nn.Linear):
+            return F.linear(x, layer.weight.T, None)
+        elif isinstance(layer, nn.Conv2d):
+            output_shape = utils.conv_output_shape(layer)
+            transpose_shape = utils.conv_transpose_shape(layer)
+            output_padding = (layer.input_shape[1] - transpose_shape[1],
+                              layer.input_shape[2] - transpose_shape[2])
+
+            rho_shape = self._rho_shape_prefix(unsqueeze=True)
+            x = x.view(rho_shape + output_shape)
+            if len(rho_shape) > 1:
+                x = x.view((x.shape[:-3].numel(),) + x.shape[-3:])
+            x_out = F.conv_transpose2d(x, layer.weight, None, layer.stride, layer.padding,
+                                       output_padding, layer.groups, layer.dilation)
+            if len(rho_shape) > 1:
+                x_out = x_out.view(rho_shape + (-1,))
+            else:
+                x_out = x_out.flatten()
+
+            return x_out
+
 
 
     # ===========================================================================
@@ -567,12 +558,15 @@ class DecompDual:
         xrelu = x.relu() if do_relu else x
 
         if ((idx + 2) == len(self.network)) and self.compute_all_bounds:
+            weight = utils.get_weight(layer, stack=False)
+            bias = utils.get_bias(layer)
             weight_apply = lambda w, x_: (w * x_.relu()).sum(dim=1)
-            pos_out = weight_apply(layer.weight, xrelu[0])
-            neg_out = weight_apply(-layer.weight, xrelu[1])
+            pos_out = weight_apply(weight, xrelu[0])
+            neg_out = weight_apply(-weight, xrelu[1])
             if layer.bias is not None:
-                pos_out += layer.bias
-                neg_out -= layer.bias
+                pos_out += bias
+                neg_out -= bias
+
             return torch.stack([pos_out, neg_out], dim=0).unsqueeze(-1)
         else:
             if isinstance(layer, nn.Conv2d):

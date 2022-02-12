@@ -87,8 +87,9 @@ class MultiStageDual:
         decomp.manual_dual_ascent(num_iters, verbose=verbose,
                                   optim_params=self.opt_params)
         decomp.choice = 'partition'
-        decomp.manual_dual_ascent(200, verbose=verbose,
+        decomp.manual_dual_ascent(100, verbose=verbose,
                                   optim_params=self.opt_params)
+
         if self.final_dims is not None:
             # Maybe a key here?
             argkey = max(decomp.partition.base_zonotopes) - 2

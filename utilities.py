@@ -5,6 +5,8 @@ import matplotlib.pyplot as plt
 import random
 import math
 import os
+import numpy as np
+import threading
 # =========================================================
 # =           Constructors and abstract classes           =
 # =========================================================
@@ -118,7 +120,53 @@ def conv_transpose_shape(conv, input_shape=None):
 
     # Maps output -> input (useful for determining padding)
 
+def conv_to_lin_weight(conv, input_shape=None):
+    """ Converts a convolutional layer to matrix ... super slow, but w/e"""
+    if input_shape is None:
+        input_shape = conv.input_shape
+    output_numel = np.prod(conv_output_shape(conv, input_shape=input_shape))
 
+    class grad_enabled_thread(threading.Thread):
+        """ Hacky threaded way to escape the 'no_grad' context """
+        def __init__(self, conv, output_numel, input_shape, output):
+            threading.Thread.__init__(self)
+            self.conv = conv
+            self.output_numel = output_numel
+            self.input_shape = input_shape
+            self.output = output
+        def run(self):
+            x = torch.zeros((self.output_numel,) + self.input_shape).requires_grad_(True)
+            x = x.to(self.conv.weight.device)
+            self.conv(x).view(self.output_numel, -1).diag().sum().backward()
+            self.output.append(x.grad.view(self.output_numel, -1).data)
+
+    output = []
+    thread1 = grad_enabled_thread(conv, output_numel, input_shape, output)
+    thread1.start()
+    thread1.join()
+    return output[0]
+
+def get_weight(layer, stack=True):
+    """ Better access method to get weight of a layer"""
+    if isinstance(layer, nn.Linear):
+        weight = layer.weight
+    else:
+        weight = conv_to_lin_weight(layer)
+    if stack:
+        return torch.stack([weight, -weight], dim=0)
+    return weight
+
+def get_bias(layer):
+    """Accompanying method for biases that works for linear/conv layers"""
+    if layer.bias is None:
+        return 0.0
+    elif isinstance(layer, nn.Linear):
+        return layer.bias
+    elif isinstance(layer, nn.Conv2d):
+        output_shape = conv_output_shape(layer)
+        return layer.bias.view(-1, 1, 1).expand(output_shape).flatten()
+    else:
+        raise NotImplementedError()
 
 def flatten(lol):
     output = []

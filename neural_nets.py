@@ -235,6 +235,20 @@ class PreactBounds:
         self.computed = True
         return self
 
+    def get_lbub(self, idx):
+        return self.bounds[idx].lbs, self.bounds[idx].ubs
+
+    def get_scale(self, idx):
+        bound = self.bounds[idx]
+        scale = torch.zeros_like(bound.center)
+        lbs, ubs = self.get_lbub(idx)
+
+        scale[bound.lbs > 0] = 1.0
+        unstable = (bound.lbs * bound.ubs) < 0
+        scale[unstable] = bound.ubs[unstable] / (bound.ubs[unstable] - bound.lbs[unstable])
+        return scale
+
+
 
 class KWBounds(PreactBounds):
     def __init__(self, network: FFNet, input_range: Hyperbox):
@@ -343,6 +357,16 @@ class BoxInformedZonos(PreactBounds):
 
         return all_boxes
 
+    def get_lbub(self, idx):
+        box_idx = (idx + 1) / 2
+        assert box_idx % 2 == 0
+
+        box = self.box_range[round(box_idx)]
+        bound = self.bounds[idx]
+
+        lbs = torch.max(box.lbs, bound.lbs)
+        ubs = torch.min(box.ubs, bound.ubs)
+        return lbs, ubs
 
 
 

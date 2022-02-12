@@ -78,6 +78,8 @@ class Hyperbox(AbstractDomain):
 
     @classmethod
     def from_zonotope(cls, zonotope):
+        if hasattr(zonotope, 'lbs'):
+            return cls(zonotope.lbs, zonotope.ubs)
         center = zonotope.center
         rad = zonotope.generator.abs().sum(dim=1)
         return cls.linf_box(center, rad)
@@ -898,6 +900,7 @@ class Zonotope(AbstractDomain):
         # Encode the parameters
         apx_params = apx_params if (apx_params is not None) else {}
         apx_params['OutputFlag'] = verbose
+        apx_params['NumericFocus'] = 3
         for k,v in apx_params.items():
             model.setParam(k, v)
 
@@ -915,6 +918,7 @@ class Zonotope(AbstractDomain):
                 print('ERR2', lin_obj.shape, xs.shape)
                 if isinstance(xs, torch.Tensor):
                     xs = xs.detach().cpu().numpy()
+
                 model.setObjective(lin_obj @ xs + relu_obj * relu_vars, gb.GRB.MINIMIZE)
 
             model.update()
