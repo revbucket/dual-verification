@@ -425,6 +425,13 @@ class DecompDual:
         if optim_params is not None:
             params.update(optim_params)
 
+
+        def get_eta(iter_num, params=params):
+            if (params.get('initial_eta') is not None) and (params.get('final_eta') is not None):
+                return params['initial_eta'] + (outer_iter / num_iters) * (params['final_eta'] - params['initial_eta'])
+            return params['eta']
+
+
         def update_duals(dual_subgrad, params=params):
             accel_dict = params['acceleration_dict']
             if accel_dict['momentum'] == 0:
@@ -448,15 +455,10 @@ class DecompDual:
 
         for outer_iter in range(num_iters):
             # Do inner loop (also over layers)
-            if (params.get('initial_eta') is not None) and (params.get('final_eta') is not None):
-                eta = params['initial_eta'] + (outer_iter / num_iters) * (params['final_eta'] - params['initial_eta'])
-            else:
-                eta = params['eta']
-
+            eta = get_eta(outer_iter)
             for inner_iter in range(params['num_inner_iter']):
                 for layer_num in layers:
                     prox_rhos = self._get_prox_rhos(layer_num, primals, eta=eta)
-
                     if layer_num == 0:
                         opt_val, x_b, x_a = self.get_0th_primal(rhos=prox_rhos)
                         cond_grad = {(1, 'A'): x_a}
@@ -481,12 +483,7 @@ class DecompDual:
 
 
             if verbose and (outer_iter % verbose) == 0:
-
-                if use_prox:
-                    prox_rhos = {k: self.rhos[k] + dual_subg[k] / eta for k in self.rhos.keys()}
-                    loss_val = self.lagrangian(rhos=prox_rhos).sum()
-                else:
-                    loss_val = self.lagrangian().sum()
+                loss_val = self.lagrangian().sum()
                 print("Outer Iter %02d | Certificate: %.02f  | Time: %.02f" % (outer_iter, loss_val, time.time() - last_time))
                 last_time = time.time()
 
@@ -541,11 +538,14 @@ class DecompDual:
         else:
             residual_kp1 = cond_grad[(idx + 2, 'A')] - primals[(idx + 2, 'A')]
             residual_k = cond_grad[(idx, 'B')] - primals[(idx, 'B')]
-            numer = residual_kp1 - (prox_rhos[idx] * residual_k).sum(dim=-1)
-            denom = -(residual_k.pow(2).sum(-1))/ eta
+            numer = residual_kp1 - (prox_rhos[idx] * residual_k).sum(dim=-1, keepdim=True)
+            denom = -(residual_k.pow(2).sum(-1, keepdim=True))/ eta
 
-        gamma = numer / denom
-        return torch.clamp(gamma, 0.0, 1.0)
+
+        gamma = torch.clamp(numer / denom, 0.0, 1.0)
+        if self.compute_all_bounds and gamma.dim() < 3:
+            gamma = gamma.unsqueeze(-1)
+        return gamma
 
 
 
@@ -571,7 +571,7 @@ class DecompDual:
             if layer.bias is not None:
                 pos_out += layer.bias
                 neg_out -= layer.bias
-            return torch.stack([pos_out, neg_out], dim=0)
+            return torch.stack([pos_out, neg_out], dim=0).unsqueeze(-1)
         else:
             return layer(x.relu().view(input_shape)).view(output_shape)
 
@@ -632,7 +632,9 @@ class DecompDual:
         lin_coeff, relu_coeff = self._get_coeffs(idx, rhos=rhos)
         bound = self.preact_bounds[idx]
         if isinstance(bound, Hyperbox):
-            opt_val, x = bound.solve_relu_program(lin_coeff, relu_coeff, get_argmin=True)
+            opt_val, argmin = bound.solve_relu_program(lin_coeff, relu_coeff, get_argmin=True)
+        #elif isinstance(bound, Zonotope):
+        #    opt_val, argmin = bound.as_hyperbox().solve_relu_program(lin_coeff, relu_coeff, get_argmin=True)
         else:
             # Identify stable neurons
             stable_coords = (bound.lbs * bound.ubs) >= 0
@@ -666,7 +668,7 @@ class DecompDual:
                 argmin[stable_coords] = argmin_0
                 argmin[~stable_coords] = argmin_1
 
-            return opt_val, argmin, self._next_layer_relu_out(idx, argmin)
+        return opt_val, argmin, self._next_layer_relu_out(idx, argmin)
 
     #---------------------------------- PARTITION STUFF ----------------------------
 
