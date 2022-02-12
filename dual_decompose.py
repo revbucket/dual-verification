@@ -3,6 +3,7 @@
 
 import torch
 import torch.nn as nn
+import numpy as np
 import torch.nn.functional as F
 import torch.optim as optim
 import time
@@ -559,21 +560,28 @@ class DecompDual:
     # ALL PRIMAL SOLVERS OUTPUT (value, argmin, armin_next_layer)
     #------------------------------- 0th layer is always an LP -----------------------------
 
-    def _next_layer_relu_out(self, idx, x):
+    def _next_layer_relu_out(self, idx, x, do_relu=True):
         layer = self.network[idx + 1]
         input_shape = self._rho_shape_prefix(unsqueeze=True) + layer.input_shape
         output_shape = self._rho_shape_prefix(unsqueeze=False) + (-1,)
+        xrelu = x.relu() if do_relu else x
 
         if ((idx + 2) == len(self.network)) and self.compute_all_bounds:
             weight_apply = lambda w, x_: (w * x_.relu()).sum(dim=1)
-            pos_out = weight_apply(layer.weight, x[0])
-            neg_out = weight_apply(-layer.weight, x[1])
+            pos_out = weight_apply(layer.weight, xrelu[0])
+            neg_out = weight_apply(-layer.weight, xrelu[1])
             if layer.bias is not None:
                 pos_out += layer.bias
                 neg_out -= layer.bias
             return torch.stack([pos_out, neg_out], dim=0).unsqueeze(-1)
         else:
-            return layer(x.relu().view(input_shape)).view(output_shape)
+            if isinstance(layer, nn.Conv2d):
+                dim = len(input_shape)
+                if dim == 3:
+                    input_shape = (1,) + input_shape
+                if dim > 3:
+                    input_shape = (np.prod(input_shape[:-3]),) + input_shape[-3:]
+            return layer(xrelu.view(input_shape)).view(output_shape)
 
     def get_0th_primal(self, rhos):
         """ Solves min_x -rho[1] @ layers[0](x) over x in input
@@ -587,7 +595,8 @@ class DecompDual:
 
         rho_shape = x.shape[:-1]
         x = x.view(rho_shape + self.network[0].input_shape)
-        return opt_val, x, self.network[0](x).view(rho_shape + (-1,))
+        return opt_val, x, self._next_layer_relu_out(-1, x, do_relu=False)
+        #return opt_val, x, self.network[0](x).view(rho_shape + (-1,))
 
 
     def get_ith_primal_naive_old(self, idx, rhos):

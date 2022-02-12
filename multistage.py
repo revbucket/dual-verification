@@ -14,9 +14,11 @@ from dual_decompose import DecompDual
 
 
 class MultiStageDual:
+
+
     def __init__(self, network, input_domain, preact_domain=Zonotope,
                  choice='partition', final_dims=None,
-                 adam_params=None):
+                 opt_method='adam', opt_params=None):
         """ Sets up to run the multistage dual optimization.
             Loops over every prefix net and uses this to compute a box-informed zonotope
             (which ultimately computes final bounds)
@@ -36,7 +38,9 @@ class MultiStageDual:
         self.choice = choice
         self.final_dims = final_dims
 
-        self.adam_params = adam_params
+
+        self.opt_method = opt_method
+        self.opt_params = None
 
 
 
@@ -81,10 +85,10 @@ class MultiStageDual:
                             preact_bounds=preact_bounds,
                             compute_all_bounds=True)
         decomp.manual_dual_ascent(num_iters, verbose=verbose,
-                                  optim_params=self.adam_params)
+                                  optim_params=self.opt_params)
         decomp.choice = 'partition'
         decomp.manual_dual_ascent(200, verbose=verbose,
-                                  optim_params=self.adam_params)
+                                  optim_params=self.opt_params)
         if self.final_dims is not None:
             # Maybe a key here?
             argkey = max(decomp.partition.base_zonotopes) - 2
