@@ -368,6 +368,21 @@ class BoxInformedZonos(PreactBounds):
         ubs = torch.min(box.ubs, bound.ubs)
         return lbs, ubs
 
+    def split(self, layer, coord):
+        """ Splits the box bounds on the layer'th layer along the coord'th coordinate
+            Recomputes the box bounds from that point
+        ARGS:
+            layer: which layer to split on (starting indexing at 0)
+            coord: which coord to split on (starting indexing at 0)
+        RETURNS:
+            two BoxInformedZonos objects
+        """
+        lo_boxrange = [_ for _ in self.boxrange]
+        hi_boxrange = [_ for _ in self.boxrange]
+
+        lo_boxrange
+
+
 
 
 class CROWN(PreactBounds):

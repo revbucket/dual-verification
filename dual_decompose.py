@@ -648,7 +648,11 @@ class DecompDual:
                           (relu_coeff * (lbs > 0)).index_select(-1, stable_idxs))
 
             # Solve LP over zonotope spanning stable neurons
-            opt_val_0, argmin_0 = bound[stable_coords].solve_lp(stable_obj, get_argmin=True)
+            if sum(stable_coords) > 0:
+                opt_val_0, argmin_0 = bound[stable_coords].solve_lp(stable_obj, get_argmin=True)
+            else:
+                opt_val_0 = argmin_0 = 0
+
 
 
             # Solve ReluProgram over BOX containing unstable neurons' idxs

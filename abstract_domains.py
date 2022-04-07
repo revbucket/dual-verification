@@ -101,6 +101,39 @@ class Hyperbox(AbstractDomain):
         return Hyperbox(new_lbs, new_ubs)
 
 
+    def split(self, i):
+        """ Splits on coordinate i
+        ARGS:
+            i: (int) coordinate to split on
+        RETURNS:
+            [hbox_lo, hbox_hi], where the ith coordinate is [l, 0], [0, u]
+        """
+
+        new_lo = torch.clone(self.lbs)
+        new_hi = torch.clone(self.ubs)
+
+        new_lo[i] = 0 if self.lbs[i] < 0 else self.lbs[i]
+        new_hi[i] = 0 if self.ubs[i] > 0 else self.ubs[i]
+        return Hyperbox(new_lo, self.ubs), Hyperbox(self.lbs, new_hi)
+
+    def normalize(self, norm):
+        if norm is None:
+            return self
+
+        center = self.center.view(norm.mean.numel(), -1)
+        rad = self.rad.view(norm.mean.numel(), -1)
+        mean = norm.mean.to(center.device)
+        std = norm.std.to(center.device)
+        while mean.dim() < center.dim():
+            mean = mean.unsqueeze(-1)
+            std = std.unsqueeze(-1)
+
+        center = (center - mean) / std
+        rad = rad / std
+        return Hyperbox.linf_box(center.flatten(), rad.flatten())
+
+
+
     def solve_lp(self, obj: torch.Tensor, bias=0.0, get_argmin: bool = False):
         """ Solves linear programs like min <obj, x> over hyperbox
         ARGS: obj : objective vector

@@ -323,7 +323,7 @@ def load_mnist_data(train_or_val, batch_size=128, shuffle=True,
 
 def load_cifar_data(train_or_val, batch_size=128, shuffle=True,
                     use_cuda=True, dataset_dir=DEFAULT_DATASET_DIR,
-                    extra_transforms=None):
+                    extra_transforms=None, use_normalize=True):
     assert train_or_val in ['train', 'val']
     use_cuda = torch.cuda.is_available() and use_cuda
 
@@ -333,12 +333,13 @@ def load_cifar_data(train_or_val, batch_size=128, shuffle=True,
                    'pin_memory': use_cuda}
     normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                      std=[0.225, 0.225, 0.225])
-    transform_chain = transforms.Compose([
-                        transforms.RandomHorizontalFlip(),
+    xforms = [transforms.RandomHorizontalFlip(),
                         transforms.RandomCrop(32, 4),
-                        transforms.ToTensor(),
-                        normalize,])
+                        transforms.ToTensor()]
+    if normalize:
+        xforms.append(normalize)
 
+    transform_chain = transforms.Compose(xforms)
 
 
     CIFAR_dataset = datasets.CIFAR10(root=dataset_dir,

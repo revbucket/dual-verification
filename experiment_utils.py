@@ -248,10 +248,13 @@ def run_lp(bin_net, test_input, use_intermed=True):
 # =           MNIST EXPERIMENT HELPERS                                         =
 # ==============================================================================
 
-def setup_mnist_example(network, ex_id, eps, show=False, elide=False):
+def setup_mnist_example(network, ex_id, eps, show=False, elide=False, normalize=None):
     # Sets up an example on the mnist dataset. Returns None if net is wrong on this example
     # Otherwise, returns (bin_net, Hyperbox) that we evaluate
     # By default clips into range [0,1]
+    # normalize : if not None, is a
+
+
     valset = datasets.MNIST(root=train.DEFAULT_DATASET_DIR, train=False, download=True,
                             transform=transforms.ToTensor())
     device = get_device()
@@ -271,7 +274,9 @@ def setup_mnist_example(network, ex_id, eps, show=False, elide=False):
     else:
         bin_net = network.binarize(y, (y+1) % 10).to(device)
 
-    test_input = Hyperbox.linf_box(x.flatten(), eps).clamp(0.0, 1.0)
+
+    test_input = Hyperbox.linf_box(x.flatten(), eps).clamp(0.0, 1.0).normalize(normalize)
+
     bin_net(x[None])
     return bin_net, test_input
 
@@ -364,16 +369,20 @@ def decomp_2d_MNIST_PARAMS(bin_net, test_input, return_obj=False, preact_bounds=
 # ===============================================================================
 
 
-def setup_cifar_example(network, ex_id, eps, elide=False):
+def setup_cifar_example(network, ex_id, eps, elide=False, normalize=None):
     # Sets up an example on the cifar dataset. Returns None if net is wrong on this example
     # Otherwise, returns (bin_net, Hyperbox) that we evaluate
     # By default clips into range [0,1]
+    if normalize is None:
+        standard_normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
+                                         std=[0.225, 0.225, 0.225])
+        valset = datasets.CIFAR10(root=train.DEFAULT_DATASET_DIR, train=False, download=True,
+                                transform=transforms.Compose([transforms.ToTensor(),
+                                                              standard_normalize]))
+    else:
+        valset = datasets.CIFAR10(root=train.DEFAULT_DATASET_DIR, train=False, download=True,
+                                transform=transforms.Compose([transforms.ToTensor()]))
 
-    normalize = transforms.Normalize(mean=[0.485, 0.456, 0.406],
-                                     std=[0.225, 0.225, 0.225])
-
-    valset = datasets.CIFAR10(root=train.DEFAULT_DATASET_DIR, train=False, download=True,
-                            transform=transforms.Compose([transforms.ToTensor(), normalize]))
     device = get_device()
     x, y = valset[ex_id]
     x = x.to(device)
@@ -389,7 +398,7 @@ def setup_cifar_example(network, ex_id, eps, elide=False):
     else:
         bin_net = network.binarize(y, (y+1) % 10).to(device)
 
-    test_input = Hyperbox.linf_box(x.flatten(), eps)
+    test_input = Hyperbox.linf_box(x.flatten(), eps).normalize(normalize)
     bin_net(x[None])
     return bin_net, test_input
 
