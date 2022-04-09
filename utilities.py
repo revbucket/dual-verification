@@ -228,6 +228,20 @@ def unravel_index(index, shape):
         index = index // dim
     return tuple(reversed(out))
 
+def get_runner_up_idx(model, x, y):
+    """ Evaluates x on model, returns False if max(f(x))!=y
+        and returns the runner up idx (int) otherwise
+
+    ARGS:
+        model: FFNet/Seq instance
+        x: [C,H,W]  (no N)
+        y: int or longtensor
+
+    """
+
+
+    pass
+
 
 # =======================================================
 # =           Display Utilities                         =

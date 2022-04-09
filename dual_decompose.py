@@ -8,6 +8,8 @@ import torch.nn.functional as F
 import torch.optim as optim
 import time
 from typing import List
+import itertools
+import functools
 from collections import OrderedDict
 from neural_nets import FFNet, PreactBounds, KWBounds, BoxInformedZonos
 from abstract_domains import Hyperbox, Zonotope
@@ -20,7 +22,9 @@ class DecompDual:
     def __init__(self, network, input_domain, preact_domain=Hyperbox,
                  choice='naive', partition=None, preact_bounds=None,
                  zero_dual=True, primal_mip_kwargs=None, mip_start=None,
-                 num_ub_iters=1, compute_all_bounds=False):
+                 num_ub_iters=1, compute_all_bounds=False,
+                 split_constraints=None, inherit_rhos=None, split_history=None,
+                 lb_only=True):
 
         self.network = network
         self.input_domain = input_domain
@@ -35,22 +39,40 @@ class DecompDual:
 
         self.mip_start = mip_start
         self.num_ub_iters = num_ub_iters
+
         # Initialize duals
+        if inherit_rhos is None:
+            self.rhos = self.init_duals(zero_dual) # either (dim,) or (lb/ub, out_idx, dim)
+        else:
+            self.rhos = OrderedDict()
+            with torch.no_grad():
+                for k in inherit_rhos:
+                    self.rhos[k] = torch.zeros_like(inherit_rhos[k], requires_grad=True)
+                    self.rhos[k].data = inherit_rhos[k].data
 
-        self.rhos = self.init_duals(zero_dual) # either (dim,) or (lb/ub, out_idx, dim)
+        if compute_all_bounds and lb_only:
+            self.rhos = {k: v[:1] for k,v in self.rhos.items()}
 
+
+        # Split constraint block
+        self.split_history = set() if split_history is None else split_history
+        self.split_constraints = split_constraints if split_constraints is not None else {} # dict mapping layer_idx -> [{0, -1, +1}, ...]
+        self.active_splits = {k: v != 0 for k, v in self.split_constraints.items()}
+        self.betas = self.init_split_constraints()
 
     # ==============================================================================
     # =           Helper methods                                                   =
     # ==============================================================================
     def _rho_shape_prefix(self, unsqueeze=True):
         # Gets the prefix for the shape of rho
+
         if self.compute_all_bounds:
+            rho_dim = next(iter(self.rhos.items()))[1].shape[0]
             if isinstance(self.network[-1], nn.Conv2d):
                 out_features = np.prod(utils.conv_output_shape(self.network[-1]))
             else:
                 out_features = self.network[-1].out_features
-            return (2, out_features)
+            return (rho_dim, out_features)
         else:
             if unsqueeze:
                 return (1,)
@@ -101,18 +123,35 @@ class DecompDual:
                                reversed(stem_rhos.items()))
             return rhos
 
+    def init_split_constraints(self):
+        betas = {}
+        device = self.preact_bounds[0].lbs.device
+        for layer in self.split_constraints:
+            rho = self.rhos[layer]
+            betas[layer] = torch.zeros(rho.shape[-1],
+                                       requires_grad=True,
+                                       device=rho.device)
+        return betas
 
+
+    def project_betas(self):
+        with torch.no_grad():
+            for layer in self.split_constraints:
+                beta = self.betas[layer]
+                active_split = self.active_splits[layer]
+                beta.relu_()
+                beta[~active_split] -= beta[~active_split]
+        #print(self.betas)
 
     def parameters(self):
-        return iter(self.rhos.values())
+        return itertools.chain(self.rhos.values(), self.betas.values())
+
 
 
     def _get_coeffs(self, idx: int, rhos=None):
         rhos = self.rhos if (rhos is None) else rhos
-
         # subproblem indices are {0, 1, 3, 5,...,}
         # Now with added bias term...
-
         if idx == 0:
             # Special case
             # Min -rho[1] * Aff(x_input)
@@ -125,10 +164,16 @@ class DecompDual:
         else:
             lin_coeff = -rhos[idx]
             if self.compute_all_bounds:
-                out_coeff = utils.get_weight(self.network[idx + 1], stack=True)
+                stack = next(iter(self.rhos.items()))[1].shape[0] == 2
+                out_coeff = utils.get_weight(self.network[idx + 1], stack=stack)
+                if not stack:
+                    out_coeff = out_coeff.unsqueeze(0)
             else:
                 out_coeff = out_coeff_old = self.network[idx + 1].weight.squeeze()
 
+        if idx in self.split_constraints:
+            #pass
+            lin_coeff -= self.split_constraints[idx] * self.betas[idx]
         return lin_coeff, out_coeff
 
 
@@ -173,6 +218,12 @@ class DecompDual:
             x_b = primals[(idx, 'B')]
             total[idx] = (rhos[idx] * (x_a - x_b)).sum(dim=-1)
             shape = total[idx].shape
+
+
+        for idx, beta in self.betas.items():
+            total[(idx, 'Beta')] = -(self.split_constraints[idx] * beta * primals[(idx, 'B')]).sum()
+            # NOT MULTICLASS HERE
+
         # And final value is just the last variable
         total[len(self.network)] = primals[(len(self.network), 'A')].view(shape)
 
@@ -212,6 +263,26 @@ class DecompDual:
         return total
 
 
+    def get_primals_timelimit(self, rhos=None, timelimit=None):
+        argmin = OrderedDict()
+        total_vals = {}
+        for idx, layer in enumerate(self.network):
+            if idx == 0:
+                # Solve linear case here
+                opt_val, primal_in, primal_out = self.get_0th_primal(rhos=rhos)
+                argmin[(1,'A')] = primal_out
+
+            elif isinstance(layer, nn.ReLU):
+                opt_val, x_b, x_a = self.get_ith_primal(idx, rhos=rhos, timelimit=timelimit)
+                argmin[(idx, 'B')] = x_b
+                argmin[(idx + 2, 'A')] = x_a
+            else:
+                continue
+            total_vals[idx] = opt_val
+
+        return sum(total_vals.values()), total_vals#, argmin
+
+
     def get_primals(self, rhos=None):
         # Returns like (total_val_dict, argmin_dict)
         argmin = OrderedDict()
@@ -233,12 +304,12 @@ class DecompDual:
         return total_vals, argmin
 
 
-    def get_ith_primal(self, idx, rhos=None):
+    def get_ith_primal(self, idx, rhos=None, timelimit=None):
         # Outputs here are (opt_val, argmin, next_layer_argmin)
         rhos = rhos if (rhos is not None) else self.rhos
 
         method_dict = {'naive': self.get_ith_primal_naive,
-                       'partition': self.get_ith_primal_partition,
+                       'partition': functools.partial(self.get_ith_primal_partition, timelimit=timelimit),
                        'simplex': self.get_ith_primal_simplex,
                        'simplex_partition': self.get_ith_primal_simplex_partition,
                        'lbfgsb': self.get_ith_primal_lbfgsb,
@@ -280,13 +351,45 @@ class DecompDual:
                 print("Iter %02d | Certificate: %.02f  | Time: %.02f" % (step, -loss_val, time.time() - last_time))
                 last_time = time.time()
             logger(self, step)
+            #print({k: v.grad for k,v in self.betas.items()})
+            if len(self.betas) > 0:
+                for layer in self.betas:
+                    continue
+                    active_split = self.active_splits[layer].nonzero().item()
+                    print('-' * 50)
+                    print(self.betas[layer].grad[active_split])
+                    print(self.get_primals()[1][(layer, 'B')][active_split])
+
             optim_obj.step()
+
+            # self.project_betas()
 
         return self.lagrangian()
 
+    def optimize_betas(self, num_steps, verbose=True):
+        if len(self.betas) == 0:
+            return
+        optim_obj = optim.Adam(self.betas.values())
+        for step in range(num_steps):
+            optim_obj.zero_grad()
+            loss_val = -1 * self.lagrangian()
+            loss_val.backward()
+
+            if verbose and (step % verbose) == 0:
+                for idx, beta in self.betas.items():
+                    active_split = self.active_splits[idx].nonzero().item()
+                    print('-' * 50)
+                    print(-loss_val)
+                    print('beta', self.betas[idx][active_split])
+                    print('grad', self.betas[idx].grad[active_split])
+                    print('z^b', self.get_primals()[1][(idx, 'B')][active_split])
+            optim_obj.step()
+            self.project_betas()
+
+
     @utils.no_grad
     def manual_dual_ascent(self, num_steps, verbose=True, iter_start=0,
-                           optim_params=None):
+                           optim_params=None, stop_at_zero=False):
         """ Runs dual_ascent for num_steps, but manually does ADAM """
         if optim_params is None:
             optim_params = {'initial_eta': 1e-3,
@@ -296,11 +399,11 @@ class DecompDual:
 
         def get_subg():
             # Get gradient as dual residuals
-            primals = self.get_primals(rhos=self.rhos)[1]
+            loss_dict, primals = self.get_primals(rhos=self.rhos)
             dual_subg = OrderedDict()
             for k in self.rhos:
                 dual_subg[k] = primals[(k, 'A')] - primals[(k, 'B')]
-            return dual_subg
+            return sum(loss_dict.values()), dual_subg
 
         def get_stepsize(t):
             return optim_params['initial_eta'] + t / float(num_steps) * (optim_params['final_eta'] - optim_params['initial_eta'])
@@ -318,7 +421,11 @@ class DecompDual:
         for step in range(1, num_steps + 1):
             step = float(step)
             stepsize = get_stepsize(step)
-            subg = get_subg()
+            loss_val, subg = get_subg()
+
+            if stop_at_zero and loss_val >= 0:
+                print("Verified >=0 in %s iterations" % int(step))
+                return
 
             m_i = {k: beta1 * v + (1 - beta1) * subg[k] for k, v in m_i.items()}
             v_i = {k: beta2 * v + (1 - beta2) * torch.pow(subg[k], 2) for k, v in v_i.items()}
@@ -331,6 +438,8 @@ class DecompDual:
                 loss_val = self.lagrangian().sum()
                 print("Iter %02d | Certificate: %.02f  | Time: %.02f" % (step, loss_val, time.time() - last_time))
                 last_time = time.time()
+
+
 
     @utils.no_grad
     def simple_prox(self, num_iters, verbose=True):
@@ -542,6 +651,90 @@ class DecompDual:
 
 
 
+    # =================================================================================
+    # =           SPLIT TECHNIQUES                                                    =
+    # =================================================================================
+
+    def _split_lambdas(self):
+        """Get Lambda's according to eq 22 in Alessandro's journal paper"""
+
+        # Step 1: get boxes for lbs ubs
+        lbubs = {}
+        for i, el in enumerate(self.preact_bounds):
+            if i % 2 == 1:
+                zono_twocol = el.twocol()
+                box_twocol = self.preact_bounds.box_range[(i + 1) // 2].twocol()
+
+                new_lb = torch.max(zono_twocol[:,0], box_twocol[:,0])
+                new_ub = torch.min(zono_twocol[:,1], box_twocol[:,1])
+                lbubs[i] = (new_lb, new_ub)
+
+        # Step 2: get Lambdas
+        lambdas = {}
+        with torch.no_grad():
+            running_rho = self._layer_transpose(-torch.ones_like(self.network[-1].weight[:,0]),
+                                                self.network[-1])
+            lambdas[len(self.network) - 2] = running_rho
+            for idx in range(len(self.network) - 2, 1, -1):
+                if not isinstance(self.network[idx], nn.ReLU):
+                    continue
+                lb, ub = lbubs[idx]
+                layer = self.network[idx -1]
+
+
+                frac = torch.relu(ub) / (torch.relu(ub) + torch.relu(-lb))
+                running_rho = self._layer_transpose(frac * running_rho, layer)
+                lambdas[idx - 2] = running_rho
+
+        return lbubs, lambdas
+
+    def find_split_babsr(self):
+        lbubs, lambdas = self._split_lambdas()
+        scores, backups = {}, {}
+        for k, lambda_ in lambdas.items():
+            lb, ub = lbubs[k]
+            bias = self.network[k - 1].bias
+
+            unstable = (lb < 0) * (ub > 0)
+            scores[k] = abs(torch.relu(lambda_* bias) \
+                            - (ub / (ub - lb)) * lambda_ * bias \
+                            -(ub * lb) / (ub - lb) * torch.relu(lambda_)) * unstable
+            backups[k] = (-ub * lb) / (ub - lb) * torch.relu(lambda_) * unstable
+
+        score_trips = [(k, i, el.item()) for k, v in scores.items()
+                        for i, el in enumerate(v) if el.item() != 0]
+        score_trips.sort(key=lambda t: t[-1], reverse=True)
+
+        for k, i,_  in score_trips:
+            if (k,i) not in self.split_history:
+                return k, i
+
+
+
+    def find_split_fsb(self):
+        raise NotImplementedError()
+
+
+    def do_split(self, split_type='babsr', split_layer=None, split_coord=None):
+        """ Returns two decomp objects with the split-ness"""
+        assert isinstance(self.preact_bounds, BoxInformedZonos)
+
+        if split_layer is None:
+            split_method = {'babsr': self.find_split_babsr,
+                        'fsb': self.find_split_fsb}[split_type]
+            split_layer, split_coord = split_method()
+
+        new_split_hist = set(self.split_history)
+        new_split_hist.add((split_layer, split_coord))
+        splits = self.preact_bounds.split(split_layer, split_coord)
+        #self.split_history.add()
+        return [DecompDual(self.network, self.input_domain, preact_domain=Zonotope,
+                          choice='partition', preact_bounds=split,
+                          # partition=self.partition # Need to do some checks here for safety
+                          compute_all_bounds=self.compute_all_bounds,
+                          inherit_rhos=self.rhos, split_history=new_split_hist)
+                for split in splits]
+        return
 
 
 
@@ -562,12 +755,17 @@ class DecompDual:
             bias = utils.get_bias(layer)
             weight_apply = lambda w, x_: (w * x_.relu()).sum(dim=1)
             pos_out = weight_apply(weight, xrelu[0])
-            neg_out = weight_apply(-weight, xrelu[1])
             if layer.bias is not None:
                 pos_out += bias
-                neg_out -= bias
 
-            return torch.stack([pos_out, neg_out], dim=0).unsqueeze(-1)
+            stack = next(iter(self.rhos.items()))[1].shape[0] == 2
+            if stack:
+                neg_out = weight_apply(-weight, xrelu[1])
+                if layer.bias is not None:
+                    neg_out -= bias
+                return torch.stack([pos_out, neg_out], dim=0).unsqueeze(-1)
+            else:
+                return torch.stack([pos_out], dim=0).unsqueeze(-1)
         else:
             if isinstance(layer, nn.Conv2d):
                 dim = len(input_shape)
@@ -715,7 +913,7 @@ class DecompDual:
 
 
 
-    def get_ith_primal_partition(self, idx: int, rhos):
+    def get_ith_primal_partition(self, idx: int, rhos, timelimit=None):
         # Basic stuff:
         bounds = self.preact_bounds[idx]
         assert isinstance(bounds, Zonotope)
@@ -724,7 +922,11 @@ class DecompDual:
 
         opt_val, x = self.gather_partitions().relu_program(idx, c1, c2,
                                                            gurobi_params=self.primal_mip_kwargs,
-                                                           start=self.mip_start)
+                                                           start=self.mip_start,
+                                                           timelimit=timelimit)
+
+        if timelimit is not None:
+            return opt_val, None, None
         return opt_val, x.data, self._next_layer_relu_out(idx, x.data)
 
 

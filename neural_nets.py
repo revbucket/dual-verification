@@ -121,11 +121,14 @@ class FFNet(nn.Module):
                                      out_features=final_linear.out_features - 1,
                                      device=final_linear.weight.device)
 
+        new_linear_layer.weight.data.zero_()
+        new_linear_layer.bias.data.zero_()
+
         running_idx = 0
         for j in range(final_linear.out_features):
             if i == j:
                 continue
-            new_linear_layer.weight[running_idx].data = (final_linear.weight[i] - final_linear.weight[j]).data
+            new_linear_layer.weight[running_idx].data.add_((final_linear.weight[i] - final_linear.weight[j]).data)
             running_idx += 1
 
 
@@ -134,7 +137,7 @@ class FFNet(nn.Module):
             for j in range(final_linear.out_features):
                 if i == j:
                     continue
-                new_linear_layer.bias[running_idx].data = (final_linear.bias[i] - final_linear.bias[j]).data
+                new_linear_layer.bias[running_idx].data.add_((final_linear.bias[i] - final_linear.bias[j]).data)
                 running_idx += 1
         else:
             new_linear_layer.bias.data.zero_()
@@ -377,10 +380,40 @@ class BoxInformedZonos(PreactBounds):
         RETURNS:
             two BoxInformedZonos objects
         """
-        lo_boxrange = [_ for _ in self.boxrange]
-        hi_boxrange = [_ for _ in self.boxrange]
+        lo_boxrange = [_ for _ in self.box_range]
+        hi_boxrange = [_ for _ in self.box_range]
 
-        lo_boxrange
+        assert (layer % 2) == 1
+        layer = (layer + 1) // 2
+        box_hi, box_lo = self.box_range[layer].split(coord)
+        hi_boxrange[layer] = box_hi
+        lo_boxrange[layer] = box_lo
+
+        return [BoxInformedZonos(self.network, self.input_range, box_range=_).compute()
+                for _ in [hi_boxrange, lo_boxrange]]
+
+    def from_split_hist(self, split_hist):
+        """
+        Generates a SINGLE preact_bounds object with given split history
+        ARGS:
+            split_hist is a list like [(layer, coord, {+1,-1})]
+        """
+        split_by_layer = {}
+        for layer, coord, split_val in split_hist:
+            if layer not in split_by_layer:
+                split_by_layer[layer] = []
+            split_by_layer[layer].append((coord, split_val))
+
+        new_boxrange = [_ for _ in self.box_range]
+        for layer, splits in split_by_layer.items():
+            layer = (layer + 1) // 2
+            box = self.box_range[layer].multisplit(splits)
+
+            new_boxrange[layer] = box
+
+        return BoxInformedZonos(self.network, self.input_range,
+                                box_range=new_boxrange).compute()
+
 
 
 

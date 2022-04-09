@@ -243,6 +243,53 @@ def run_lp(bin_net, test_input, use_intermed=True):
     return lp_and_grb_lbs.item(), lp_and_grb_time
 
 
+def merge_seq(decomp, seq, global_timelimit=None, verbose=True):
+    """ Runs a sequence of merges and computes a sequence of increasingly tighter mips
+        STOPS whenever sum >=0
+        otherwise just reruns the mips that get tightened
+    ARGS:
+        - decomp is a
+        - seq is a list of elements that either look like
+            {layer_i:partitition_size, layer_j:partition_size}
+         or
+            ({...}, thisTimelimit)
+         e.g. [{5:16, 7:16}, ({5:32, 7:32}, 10.0)]
+        - global_timelimit is a fallback global timelimit if not specified in seq
+    RETURNS:
+        Returns sum over primal val dict
+
+    """
+    valsum = lambda d: sum(d.values())
+    def multicheck(sums):
+        if isinstance(sums, torch.Tensor) and sums.numel() > 1:
+            return min(sums[0]) >= 0
+        else:
+            return sums >= 0
+
+
+    primal_dict = decomp.get_primals()[0]
+    if multicheck(valsum(primal_dict)):
+        return valsum(primal_dict)
+
+    for el in seq:
+        if verbose:
+            print("Trying merge: ", el)
+            print("Current valsum:", valsum(primal_dict))
+        if isinstance(el, tuple):
+            merge = el[0]
+            timelimit = el[1]
+        else:
+            merge = el
+            timelimit = global_timelimit
+
+        decomp.merge_partitions(merge)
+        for k in merge:
+            primal_dict[k] = decomp.get_ith_primal(k, timelimit=timelimit)[0]
+            if multicheck(valsum(primal_dict)):
+                return valsum(primal_dict)
+
+    return valsum(primal_dict)
+
 
 # ==============================================================================
 # =           MNIST EXPERIMENT HELPERS                                         =

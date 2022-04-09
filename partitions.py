@@ -265,7 +265,7 @@ class PartitionGroup():
 					continue
 				if el not in accounted_dims:
 					return [i, el]
-
+			return [el]
 
 		for i in group_order:
 			i = int(i.item())
@@ -273,12 +273,17 @@ class PartitionGroup():
 				continue
 			new_pair = get_pair(i)
 			pairs.append(new_pair)
-			accounted_dims.add(new_pair[0])
-			accounted_dims.add(new_pair[1])
+			try:
+				accounted_dims.add(new_pair[0])
+				if len(new_pair) > 1:
+					accounted_dims.add(new_pair[1])
+			except:
+				print("NP", new_pair, accounted_dims)
+				raise RuntimeError
 		return pairs
 
 
-	def relu_program(self, i, c1, c2, gurobi_params=None, start=None, **kwargs):
+	def relu_program(self, i, c1, c2, gurobi_params=None, start=None, timelimit=None, **kwargs):
 		""" Returns (obj_val, argmin) for the i^th partition
 			of relu program: min c1*z + c2*relu(z)
 		ARGS:
@@ -352,16 +357,17 @@ class PartitionGroup():
 				box_zono_masks = self.box_zono_masks.get(i)
 
 
-
 			return zono.batch_2d_relu_program(c1, c2, groups=groups,
-											  group_vs=vertices,
-											  group_crossings=crossings,
-											  group_crossing_masks=crossing_masks,
-											  group_vertex_masks=vertex_masks,
-											  group_box_vertices=box_vertices,
-											  group_box_masks=box_masks,
-											  box_zono_crossings=box_zono_crossings,
-											  box_zono_masks=box_zono_masks)
+									  group_vs=vertices,
+									  group_crossings=crossings,
+									  group_crossing_masks=crossing_masks,
+									  group_vertex_masks=vertex_masks,
+									  group_box_vertices=box_vertices,
+									  group_box_masks=box_masks,
+									  box_zono_crossings=box_zono_crossings,
+									  box_zono_masks=box_zono_masks)
+
+
 
 		# ~~~~~~~~~~~~~~~~~~~~~~~/New block~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
@@ -376,21 +382,27 @@ class PartitionGroup():
 
 
 		#### MULTITHREADING BLOCK
-		def subproblem(group, subzono, all_c1=c1, all_c2=c2):
+		def subproblem(group, subzono, all_c1=c1, all_c2=c2, timelimit=timelimit):
 			box_bounds = None if ((self.box_info or {}).get(i) is None) else self.box_info[i][group]
 			c1 = all_c1.index_select(-1, torch.tensor(group, device=all_c1.device).long())
 			c2 = all_c2.index_select(-1, torch.tensor(group, device=all_c2.device).long())
 
 			try:
 				min_val, sub_argmin, _, _ = subzono.solve_relu_mip(c1, c2, apx_params=gurobi_params,
-					                                               start=start, box_bounds=box_bounds)
+					                                               start=start, box_bounds=box_bounds,
+					                                               timelimit=timelimit)
+				if timelimit is not None:
+					return min_val, None, group
 			except:
 				# Some weird voodoo that sometimes gurobi needs to work...
 				subzono.relu_prog_model = None
 				subzono.solve_relu_mip(torch.zeros_like(subzono.center), torch.zeros_like(subzono.center),
 									   apx_params=gurobi_params, box_bounds=box_bounds)
 				min_val, sub_argmin, _, _ = subzono.solve_relu_mip(c1, c2, apx_params=gurobi_params,
-					                                               start=start, box_bounds=box_bounds)
+					                                               start=start, box_bounds=box_bounds,
+					                                               timelimit=timelimit)
+				if timelimit is not None:
+					return min_val, None, group
 			return min_val, sub_argmin, group
 
 
@@ -399,6 +411,8 @@ class PartitionGroup():
 		else:
 			thread_outs = joblib.Parallel(n_jobs=self.num_threads)(subproblem(group, subzono) for (group, subzono) in zip(groups, parts))
 		#####
+		if timelimit is not None:
+			return sum(_[0] for _ in thread_outs), None
 
 		# Resolve thread outs
 		obj_val = None

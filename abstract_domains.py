@@ -40,6 +40,9 @@ class Hyperbox(AbstractDomain):
         self.rad = self.ubs - self.center
         self.dim = self.lbs.numel()
 
+    def __repr__(self):
+        return "Hyperbox(%s)" % self.dim
+
     def cuda(self):
         self.lbs = self.lbs.cuda()
         self.ubs = self.ubs.cuda()
@@ -115,6 +118,28 @@ class Hyperbox(AbstractDomain):
         new_lo[i] = 0 if self.lbs[i] < 0 else self.lbs[i]
         new_hi[i] = 0 if self.ubs[i] > 0 else self.ubs[i]
         return Hyperbox(new_lo, self.ubs), Hyperbox(self.lbs, new_hi)
+
+    def multisplit(self, splits):
+        """ Splits along multiple coordinates
+            Returns a SINGLE hyperbox
+        ARGS:
+            splits is a list like (coord, {+1,-1})
+            where coord is the index, and +1,-1 denotes if we want the positive
+            or negative aspect
+        """
+        lbs = torch.clone(self.lbs)
+        ubs = torch.clone(self.ubs)
+
+        for coord, val in splits:
+            if val == 1:
+                lbs[coord] = 0.0
+                ubs[coord] = torch.relu(ubs[coord])
+            else:
+                lbs[coord] = -torch.relu(-lbs[coord])
+                ubs[coord] = 0.0
+
+        return Hyperbox(lbs, ubs)
+
 
     def normalize(self, norm):
         if norm is None:
@@ -919,7 +944,7 @@ class Zonotope(AbstractDomain):
 
 
     def solve_relu_mip(self, c1, c2, apx_params=None, verbose=False, start=None, start_kwargs={},
-                       box_bounds=None):
+                       box_bounds=None, timelimit=None):
         # Setup the model (or load it if saved)
         if self.keep_mip:
             if self.relu_prog_model is None:
@@ -934,12 +959,14 @@ class Zonotope(AbstractDomain):
         apx_params = apx_params if (apx_params is not None) else {}
         apx_params['OutputFlag'] = verbose
         apx_params['NumericFocus'] = 3
+        if timelimit is not None:
+            apx_params['TimeLimit'] = timelimit
         for k,v in apx_params.items():
             model.setParam(k, v)
 
         # Set the objective and optimize
 
-        def model_opt(c1, c2, xs=xs):
+        def model_opt(c1, c2, xs=xs, timelimit=timelimit):
             lin_obj = torch.clone(c1).squeeze().detach().cpu().numpy()
             lin_obj[on_idxs] += c2[on_idxs].detach().cpu().numpy()
             relu_obj = c2[unc_idxs].squeeze().detach().cpu().numpy()
@@ -956,6 +983,9 @@ class Zonotope(AbstractDomain):
 
             model.update()
             model.optimize()
+
+            if timelimit is not None:
+                return model.ObjBound, None, None, model
             xvals = torch.tensor([_.x for _ in xs], device=self.center.device)
             yvals = torch.tensor([_.x for _ in ys], device=self.center.device)
             return model.ObjBound, xvals, yvals, model
@@ -973,9 +1003,14 @@ class Zonotope(AbstractDomain):
                     obj, xs, _, _ = model_opt(c1[i][j], c2[i][j])
                     objBounds[i][j] = obj
                     x_rows.append(xs)
-                xvals.append(torch.stack(x_rows, dim=0))
-            xvals = torch.stack(xvals, dim=0)
-            return objBounds, xvals, None, model
+                if timelimit is None:
+                    xvals.append(torch.stack(x_rows, dim=0))
+            if timelimit is None:
+                xvals = torch.stack(xvals, dim=0)
+            if timelimit is None:
+                return objBounds, xvals, None, model
+            else:
+                return objBounds, None, None, model
 
 
 
@@ -1355,6 +1390,8 @@ class Zonotope(AbstractDomain):
 
         # Setup tools
         true_argmin = torch.zeros_like(c1)
+
+
         if c1.dim() == 1:
             c1 = c1[groups].unsqueeze(-1)
             c2 = c2[groups].unsqueeze(-1)
@@ -1362,6 +1399,7 @@ class Zonotope(AbstractDomain):
             c1 = c1[:,:,groups].unsqueeze(-1)
             c2 = c2[:,:,groups].unsqueeze(-1)
         eval_fxn = lambda vs: (c1 * vs + c2 * vs.relu()).sum(dim=-2)
+
 
         def mask_op(vals, mask):
             if vals.dim() <= 2:
