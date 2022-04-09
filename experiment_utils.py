@@ -295,7 +295,7 @@ def merge_seq(decomp, seq, global_timelimit=None, verbose=True):
 # =           MNIST EXPERIMENT HELPERS                                         =
 # ==============================================================================
 
-def setup_mnist_example(network, ex_id, eps, show=False, elide=False, normalize=None):
+def setup_mnist_example(network, ex_id, eps, show=False, elide=False, normalize=None, return_x=False):
     # Sets up an example on the mnist dataset. Returns None if net is wrong on this example
     # Otherwise, returns (bin_net, Hyperbox) that we evaluate
     # By default clips into range [0,1]
@@ -325,8 +325,10 @@ def setup_mnist_example(network, ex_id, eps, show=False, elide=False, normalize=
     test_input = Hyperbox.linf_box(x.flatten(), eps).clamp(0.0, 1.0).normalize(normalize)
 
     bin_net(x[None])
-    return bin_net, test_input
-
+    if return_x:
+        return bin_net, test_input, x
+    else:
+        return bin_net, test_input
 
 def load_mnist_ffnet(pth=None):
     sequential = nn.Sequential(nn.Linear(784, 512), nn.ReLU(),
@@ -416,7 +418,7 @@ def decomp_2d_MNIST_PARAMS(bin_net, test_input, return_obj=False, preact_bounds=
 # ===============================================================================
 
 
-def setup_cifar_example(network, ex_id, eps, elide=False, normalize=None):
+def setup_cifar_example(network, ex_id, eps, elide=False, normalize=None, return_x=False):
     # Sets up an example on the cifar dataset. Returns None if net is wrong on this example
     # Otherwise, returns (bin_net, Hyperbox) that we evaluate
     # By default clips into range [0,1]
@@ -447,8 +449,10 @@ def setup_cifar_example(network, ex_id, eps, elide=False, normalize=None):
 
     test_input = Hyperbox.linf_box(x.flatten(), eps).normalize(normalize)
     bin_net(x[None])
-    return bin_net, test_input
-
+    if return_x:
+        return bin_net, test_input, x
+    else:
+        return bin_net, test_input
 
 def load_cifar_sgd(pth=None):
     model = nn.Sequential(
