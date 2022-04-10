@@ -68,11 +68,10 @@ def scrub_idxs(decomp):
     idxs = (lagrange < 0).flatten().nonzero().flatten()
     pos_idxs = (lagrange >= 0).flatten().nonzero().flatten()
     if len(idxs) == 0:
-        return True
+        return True, torch.min(lagrange).item()
     print("Scrubbing idxs", pos_idxs)
     decomp.subindex(idxs)
-    return False
-
+    return False, torch.min(lagrange).item()
 
 ############################ MAIN SCRIPT ############################
 
@@ -96,17 +95,21 @@ for idx in range(args.start_idx, args.end_idx):
     ovalout = eu.run_optprox(elide_net, test_input, use_intermed=False, return_model=True)
     zonoinfo = eu.ovalnet_to_zonoinfo(ovalout[0], elide_net, test_input)
 
-    print(zonoinfo.box_range)
-    oval_range = torch.min(zonoinfo.box_range[-1].lbs)
+    print(zonoinfo.box_range[-1].lbs)
+    oval_range = torch.min(zonoinfo.box_range[-1].lbs).item()
     print("Example %s: OVAL MIN %s" % (idx, oval_range))
-    output_dict['optprox'] = ((oval_range >= 0).item(), time.time() - start, idx)
+    output_dict['optprox'] = ((oval_range >= 0), time.time() - start, oval_range, idx)
 
-    if oval_range < SKIP_VAL:
-        output_dict[idx] = (False, time.time() - start)
+
+    # Case when bound is too bad to even try
+    if oval_range < SKIP_VAL or oval_range >= 0:
+        zd_entry = (oval_range >= 0, time.time() - start, oval_range, idx)
+        output_dict['ZD_premip'] = zd_entry
+        output_dict['ZD_postmip'] = zd_entry
+
         pprint.pprint(output_dict)
         write_file(idx, output_dict)
         continue
-
 
 
 
@@ -125,15 +128,16 @@ for idx in range(args.start_idx, args.end_idx):
     #idxs = (decomp.preact_bounds.box_range[-1].lbs < 0).nonzero().flatten()
     with torch.no_grad():
         decomp.manual_dual_ascent(2000, verbose=100)
-        scrub_idxs(decomp)
-        passing = False
-        for seq in [{15:25, 13:25, 11:25}, {9:25, 7:25, 5:25, 3:25, 1:25}, {15:50, 13:50, 11:50}, {9:50, 7:50, 5:50}]:
-            decomp.merge_partitions(seq)
-            passing = scrub_idxs(decomp)
-            if passing:
-                break
+        passing, lagrange = scrub_idxs(decomp)
+        output_dict['ZD_premip'] = (passing, time.time() - start, lagrange, idx)
+        if not passing:
+            for seq in [{15:25, 13:25, 11:25}, {9:25, 7:25, 5:25, 3:25, 1:25}, {15:50, 13:50, 11:50}, {9:50, 7:50, 5:50}]:
+                decomp.merge_partitions(seq)
+                passing, lagrange = scrub_idxs(decomp)
+                if passing:
+                    break
 
     runtime = time.time() - start
-    output_dict['ZD'] = (passing, runtime, idx)
+    output_dict['ZD_postmip'] = (passing, runtime, lagrange, idx)
     pprint.pprint(output_dict)
     write_file(idx, output_dict)
