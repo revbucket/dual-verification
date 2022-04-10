@@ -21,6 +21,7 @@ pandas = "^1.4.0"
 tables = "^3.7.0"
 onnx = "^1.11.0"
 onnx2pytorch = "^0.4.1"
+cleverhans = "^4.0.0"
 
 [tool.poetry.dev-dependencies]
 black = "^21.12b0"
