@@ -44,9 +44,9 @@ args = parser.parse_args()
 assert args.start_idx < args.end_idx
 print(args)
 
-EPS = 0.026
+EPS = 0.120
 SKIP_VAL = -10
-PREFIX = 'exp_data/eran_5x100/'
+PREFIX = 'exp_data/eran_convSmall/'
 def filenamer(idx):
     return PREFIX + str(idx) + '.pkl'
 
@@ -76,14 +76,15 @@ def scrub_idxs(decomp):
 
 ############################ MAIN SCRIPT ############################
 
-eran_5x100 = eu.load_eran_5x100()
+eran_convSmall, normalize = eu.load_eran_convSmall()
 if torch.cuda.is_available():
-    eran_5x100 = eran_5x100.cuda()
+    eran_convSmall = eran_convSmall.cuda()
 
 for idx in range(args.start_idx, args.end_idx):
     print("Handling MNIST Example %s" % idx)
 
-    elide_net, test_input = eu.setup_mnist_example(eran_5x100, idx, EPS, elide=True)
+    elide_net, test_input = eu.setup_mnist_example(eran_convSmall, idx, EPS, elide=True,
+                                                   normalize=normalize)
     print(elide_net)
     if elide_net is None:
         print("Skipping example %s : incorrect model " % idx)
@@ -112,7 +113,7 @@ for idx in range(args.start_idx, args.end_idx):
 
     decomp = DecompDual(elide_net, test_input, Zonotope, choice='partition',
                         partition=PartitionGroup(None, partition_dim=2, partition_rule='similarity'),
-                        preact_bounds=zonoinfo, zero_dual=False, compute_all_bounds=True,
+                        preact_bounds=zonoinfo, zero_dual=True, compute_all_bounds=True,
                        lb_only=True)
 
     decomp.lagrangian()
@@ -122,16 +123,27 @@ for idx in range(args.start_idx, args.end_idx):
     decomp.subindex(neg_idxs)
 
 
-    #idxs = (decomp.preact_bounds.box_range[-1].lbs < 0).nonzero().flatten()
     with torch.no_grad():
-        decomp.manual_dual_ascent(1000, verbose=100)
+        decomp.manual_dual_ascent(2000, verbose=100, optim_params={'initial_eta': 1e-3,
+                                                                   'final_eta': 1e-5,
+                                                                   'betas': (0.9, 0.999)})
         scrub_idxs(decomp)
         passing = False
-        for seq in [{9:25}, {7:25, 9:25}, {1:25, 3:25, 5:25}, {7:50, 9:50}, {1:50, 3:50, 5:50, 7:50, 9:50}]:
-            decomp.merge_partitions(seq)
+
+        decomp.merge_partitions({5:25})
+        passing = scrub_idxs(decomp)
+        if not passing:
+            decomp.manual_dual_ascent(10,optim_params={'initial_eta': 1e-3,
+                                                                'final_eta': 1e-4,
+                                                                'betas':(0.9, 0.999)})
             passing = scrub_idxs(decomp)
-            if passing:
-                break
+        if not passing:
+            for seq in [{5:50, 3:25}, {3:50}, {5:100, 3:80}]:
+                decomp.merge_partitions(seq)
+                passing = scrub_idxs(decomp)
+                if passing:
+                    break
+
 
     runtime = time.time() - start
     output_dict['ZD'] = (passing, runtime, idx)

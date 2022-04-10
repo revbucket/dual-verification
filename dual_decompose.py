@@ -275,6 +275,7 @@ class DecompDual:
         In a dict like:
             {subproblem_idx: (subproblem_lb, subproblem_Ub, subproblem_time)}
         """
+        print("UBS ARE GOING TO BE WRONG HERE")
         rhos = rhos if (rhos is not None) else self.rhos
         apx_params = {'MIPFocus': 3}
         if time_limit is not None:
@@ -288,11 +289,11 @@ class DecompDual:
                 val = self.get_0th_primal(rhos=rhos)[0]
                 total[idx] = (val, val, clock())
             elif isinstance(layer, nn.ReLU):
-                model = self.get_ith_primal_mip(idx, rhos, apx_params=apx_params, return_model=True)
-                total[idx] = (model.ObjBound, model.objVal, clock())
+                model, lbs = self.get_ith_primal_mip(idx, rhos, apx_params=apx_params, return_model=True)
+                total[idx] = (lbs, torch.zeros_like(lbs), clock())
 
-        total_lbs = sum(_[0] for _ in total.values()).data.item()
-        total_ubs = sum(_[1] for _ in total.values()).data.item()
+        total_lbs = sum(_[0] for _ in total.values()).data
+        total_ubs = sum(_[1] for _ in total.values()).data
         total_time = sum(_[2] for _ in total.values())
         total['total'] = (total_lbs, total_ubs, total_time)
         return total
@@ -1025,7 +1026,7 @@ class DecompDual:
         if not return_model:
             return obj, xvals.data, self._next_layer_relu_out(idx, xvals.data)
         else:
-            return model
+            return model, obj
 
 
 

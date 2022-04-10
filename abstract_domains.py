@@ -974,8 +974,8 @@ class Zonotope(AbstractDomain):
                 model.setObjective(lin_obj @ xs + relu_obj @ relu_vars, gb.GRB.MINIMIZE)
             except Exception as err:
                 # In the case that |unc_idxs| == 1
-                print('ERR', lin_obj.__class__, xs.__class__, type(relu_obj))
-                print('ERR2', lin_obj.shape, xs.shape)
+                #print('ERR', lin_obj.__class__, xs.__class__, type(relu_obj))
+                #print('ERR2', lin_obj.shape, xs.shape)
                 if isinstance(xs, torch.Tensor):
                     xs = xs.detach().cpu().numpy()
 

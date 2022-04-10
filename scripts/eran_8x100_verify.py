@@ -46,7 +46,7 @@ print(args)
 
 EPS = 0.026
 SKIP_VAL = -10
-PREFIX = 'exp_data/eran_5x100/'
+PREFIX = 'exp_data/eran_8x100/'
 def filenamer(idx):
     return PREFIX + str(idx) + '.pkl'
 
@@ -76,14 +76,14 @@ def scrub_idxs(decomp):
 
 ############################ MAIN SCRIPT ############################
 
-eran_5x100 = eu.load_eran_5x100()
+eran_8x100 = eu.load_eran_8x100()
 if torch.cuda.is_available():
-    eran_5x100 = eran_5x100.cuda()
+    eran_8x100 = eran_8x100.cuda()
 
 for idx in range(args.start_idx, args.end_idx):
     print("Handling MNIST Example %s" % idx)
 
-    elide_net, test_input = eu.setup_mnist_example(eran_5x100, idx, EPS, elide=True)
+    elide_net, test_input = eu.setup_mnist_example(eran_8x100, idx, EPS, elide=True)
     print(elide_net)
     if elide_net is None:
         print("Skipping example %s : incorrect model " % idx)
@@ -127,11 +127,14 @@ for idx in range(args.start_idx, args.end_idx):
         decomp.manual_dual_ascent(1000, verbose=100)
         scrub_idxs(decomp)
         passing = False
-        for seq in [{9:25}, {7:25, 9:25}, {1:25, 3:25, 5:25}, {7:50, 9:50}, {1:50, 3:50, 5:50, 7:50, 9:50}]:
+        for seq in [{15:25, 13:25, 11:25}, {9:25, 7:25}, {5:25, 3:25, 1:25}, {9:50, 7:50}, {5:50, 3:50}]:
             decomp.merge_partitions(seq)
             passing = scrub_idxs(decomp)
             if passing:
                 break
+    if not passing:
+        # Final shot: try to solve the full MIPs with time limits
+        pass
 
     runtime = time.time() - start
     output_dict['ZD'] = (passing, runtime, idx)

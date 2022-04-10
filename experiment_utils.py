@@ -356,6 +356,28 @@ def load_eran_5x100(pth=None):
     net = FFNet(torch.load(pth)['pytorch_model'])
     return net
 
+def load_eran_5x200(pth=None):
+    pth = os.path.join(dir_path, 'scripts/mnist_relu_6_200_onnx2torch.torch')
+    net = FFNet(torch.load(pth)['pytorch_model'])
+    return net
+
+def load_eran_8x100(pth=None):
+    pth = os.path.join(dir_path, 'scripts/mnist_relu_9_100_onnx2torch.torch')
+    net = FFNet(torch.load(pth)['pytorch_model'])
+    return net
+
+def load_eran_8x200(pth=None):
+    pth = os.path.join(dir_path, 'scripts/mnist_relu_9_200_onnx2torch.torch')
+    net = FFNet(torch.load(pth)['pytorch_model'])
+    return net
+
+
+def load_eran_convSmall(pth=None):
+    pth = os.path.join(dir_path, 'scripts/convSmallRELU__Point_onnx2torch.torch')
+    net = FFNet(torch.load(pth)['pytorch_model'])
+    normalize = torch.load(pth)['normalize']
+    return net, normalize
+
 
 
 def load_mnist_ffnet(pth=None):
