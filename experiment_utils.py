@@ -271,6 +271,16 @@ def merge_seq(decomp, seq, global_timelimit=None, verbose=True):
     if multicheck(valsum(primal_dict)):
         return valsum(primal_dict)
 
+    neg_idxs = (valsum(primal_dict).flatten() <= 0).nonzero().flatten()
+
+    if len(neg_idxs) < decomp.network[-1].out_features:
+        print(valsum(primal_dict))
+        if verbose:
+            print("Subbing idxs", neg_idxs)
+        decomp = decomp.subindex(neg_idxs)
+        primal_dict = {k: v[:, neg_idxs] for k,v in primal_dict.items()}
+
+
     for el in seq:
         if verbose:
             print("Trying merge: ", el)
@@ -287,6 +297,16 @@ def merge_seq(decomp, seq, global_timelimit=None, verbose=True):
             primal_dict[k] = decomp.get_ith_primal(k, timelimit=timelimit)[0]
             if multicheck(valsum(primal_dict)):
                 return valsum(primal_dict)
+
+        # Remove the negative indexes
+        neg_idxs = (valsum(primal_dict).flatten() <= 0).nonzero().flatten()
+        if len(neg_idxs) < decomp.network[-1].out_features:
+            print(valsum(primal_dict))
+            if verbose:
+                print("Subbing idxs", neg_idxs)
+            decomp = decomp.subindex(neg_idxs)
+            primal_dict = {k: v[:, neg_idxs] for k,v in primal_dict.items()}
+
 
     return valsum(primal_dict)
 
@@ -329,6 +349,14 @@ def setup_mnist_example(network, ex_id, eps, show=False, elide=False, normalize=
         return bin_net, test_input, x
     else:
         return bin_net, test_input
+
+
+def load_eran_5x100(pth=None):
+    pth = os.path.join(dir_path, 'scripts/mnist_relu_6_100_onnx2torch.torch')
+    net = FFNet(torch.load(pth)['pytorch_model'])
+    return net
+
+
 
 def load_mnist_ffnet(pth=None):
     sequential = nn.Sequential(nn.Linear(784, 512), nn.ReLU(),

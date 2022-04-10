@@ -40,6 +40,8 @@ class DecompDual:
         self.mip_start = mip_start
         self.num_ub_iters = num_ub_iters
 
+        self.lb_only = lb_only
+        print("LB ONLY", self.lb_only)
         # Initialize duals
         if inherit_rhos is None:
             self.rhos = self.init_duals(zero_dual) # either (dim,) or (lb/ub, out_idx, dim)
@@ -49,6 +51,7 @@ class DecompDual:
                 for k in inherit_rhos:
                     self.rhos[k] = torch.zeros_like(inherit_rhos[k], requires_grad=True)
                     self.rhos[k].data = inherit_rhos[k].data
+
 
         if compute_all_bounds and lb_only:
             self.rhos = {k: v[:1] for k,v in self.rhos.items()}
@@ -67,7 +70,10 @@ class DecompDual:
         # Gets the prefix for the shape of rho
 
         if self.compute_all_bounds:
-            rho_dim = next(iter(self.rhos.items()))[1].shape[0]
+            if self.lb_only:
+                rho_dim = 1
+            else:
+                rho_dim = 2
             if isinstance(self.network[-1], nn.Conv2d):
                 out_features = np.prod(utils.conv_output_shape(self.network[-1]))
             else:
@@ -77,6 +83,11 @@ class DecompDual:
             if unsqueeze:
                 return (1,)
             return ()
+
+    def _rhos_subindex(self, idxs):
+        return {k: v[:, idxs, :].clone().detach().requires_grad_(True)
+                for k,v in self.rhos.items()}
+
 
 
     def init_duals(self, zero_dual):
@@ -200,6 +211,30 @@ class DecompDual:
             return x_out
 
 
+    def subindex(self, idxs):
+        """ Makes a version of this with a net with only the smaller subset of
+            final layer idxs
+        """
+
+        assert isinstance(self.preact_bounds, BoxInformedZonos)
+
+        # Change the net:
+        new_net = FFNet(utils.replace_net(self.network, idxs))
+
+        # Change the rhos:
+        new_rhos = self._rhos_subindex(idxs)
+
+        # Change the preact bounds:
+        self.preact_bounds.subindex(idxs)
+
+        # Change the partition
+        max_k = max(self.partition.base_zonotopes.keys())
+        self.partition.base_zonotopes[max_k] = self.preact_bounds[-1]
+
+        # And then make a new instance of this...
+        self.network = new_net
+        self.rhos = new_rhos
+        return self
 
     # ===========================================================================
     # =           Lagrangian compute methods                                    =

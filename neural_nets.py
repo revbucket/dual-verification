@@ -415,6 +415,11 @@ class BoxInformedZonos(PreactBounds):
                                 box_range=new_boxrange).compute()
 
 
+    def subindex(self, idxs):
+        self.bounds[-1] = self.bounds[-1][idxs]
+        self.box_range[-1] = self.box_range[-1][idxs]
+
+        return self
 
 
 

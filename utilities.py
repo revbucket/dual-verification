@@ -238,10 +238,33 @@ def get_runner_up_idx(model, x, y):
         y: int or longtensor
 
     """
-
-
     pass
 
+def linear_subindex(linear, idxs):
+    # Makes a new linear model
+    weight = linear.weight
+    bias = linear.bias
+    device = weight.device
+
+    new_linear = nn.Linear(linear.in_features, len(idxs)).to(device)
+
+    new_linear.weight.data.zero_()
+    new_linear.bias.data.zero_()
+
+    for i, el in enumerate(idxs):
+        new_linear.weight[i].data.add_(weight[el].data)
+        new_linear.bias[i].data.add_(bias[el].data)
+
+    if hasattr(linear, 'input_shape'):
+        new_linear.input_shape = linear.input_shape
+
+    return new_linear
+
+
+def replace_net(net, idxs):
+    seq = list(net[:-1])
+    seq.append(linear_subindex(net[-1], idxs))
+    return nn.Sequential(*seq)
 
 # =======================================================
 # =           Display Utilities                         =

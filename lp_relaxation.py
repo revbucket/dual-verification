@@ -93,7 +93,7 @@ class LPRelax():
         base_name, layer_namer = self.get_namer(layer_idx)
         if dilate:
             eps = 1e-8
-            bounds_twocol = bounds_twocol + torch.tensor([[-eps, eps]])
+            bounds_twocol = bounds_twocol + torch.tensor([[-eps, eps]]).to(bounds_twocol.device)
 
         new_vars = [self.model.addVar(lb=lb, ub=ub, name=layer_namer(i))
                     for i, (lb, ub) in enumerate(bounds_twocol)]
